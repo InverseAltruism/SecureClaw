@@ -479,7 +479,7 @@ prompt_install_profile() {
     echo
     echo "  ${BOLD}1. Quick Secure Install${RESET} — ${GREEN}Recommended${RESET}"
     dim "Best for non-technical users. Uses secure defaults and minimal prompts."
-    dim "Defaults: Podman rootless, Hardened tier, systemd enabled."
+    dim "Defaults: Podman rootless, Balanced tier, systemd enabled."
     echo
     echo "  ${BOLD}2. Advanced Guided Install${RESET}"
     dim "Full control over runtime, security tier, paths, ports, and limits."
@@ -511,7 +511,7 @@ apply_quick_secure_defaults() {
     section "Applying Quick Secure Defaults"
 
     CONTAINER_RUNTIME="podman"
-    SECURITY_TIER="hardened"
+    SECURITY_TIER="balanced"
     INSTALL_DIR="/home/openclaw/.openclaw"
     SYSTEM_USER="openclaw"
     ENABLE_SYSTEMD=1
@@ -667,36 +667,37 @@ prompt_security_level() {
     echo
     echo "Choose your security tier:"
     echo
-    echo "  ${BOLD}1. Standard${RESET} — Basic rootless isolation"
-    dim "Rootless container, localhost binding, token auth, user namespaces"
-    dim "Best for: Local development and testing"
+    echo "  ${BOLD}1. Standard${RESET} — Maximum compatibility, baseline isolation"
+    dim "Rootless container (or hardened Docker), token auth, localhost host-port exposure."
+    dim "Best for: Development, troubleshooting, broad compatibility."
     echo
-    echo "  ${BOLD}2. Hardened${RESET} — Production-grade security ${GREEN}(recommended)${RESET}"
-    dim "All Standard features plus:"
-    dim "  • Read-only root filesystem (prevents persistence of malicious code)"
-    dim "  • All Linux capabilities dropped (minimal kernel privileges)"
-    dim "  • no-new-privileges flag (blocks privilege escalation)"
-    dim "  • Resource limits: CPU, memory, PID caps (prevents DoS)"
-    dim "  • Network isolation via slirp4netns (no direct host access)"
-    dim "  • Workspace-only file access (restricts file operations)"
-    dim "Best for: Production VPS deployments"
+    echo "  ${BOLD}2. Balanced${RESET} — Secure + full OpenClaw features ${GREEN}(recommended)${RESET}"
+    dim "Read-only root filesystem, cap-drop, no-new-privileges, resource limits."
+    dim "Keeps ~/.openclaw writable for channels, credentials, onboarding, and extensions."
+    dim "Best for: Production where you want strong security without breaking OpenClaw features."
     echo
-    echo "  ${BOLD}3. Paranoid${RESET} — Maximum isolation"
-    dim "All Hardened features plus:"
+    echo "  ${BOLD}3. Hardened (strict)${RESET} — Highest app-level restriction"
+    dim "All Balanced controls plus workspace-only tool restrictions and read-only ~/.openclaw mount."
+    dim "May limit OpenClaw features that need writes outside workspace (onboarding/channels/credentials)."
+    echo
+    echo "  ${BOLD}4. Paranoid${RESET} — Maximum isolation"
+    dim "All Hardened (strict) features plus:"
     dim "  • Host egress firewall via nftables (blocks cloud metadata,"
     dim "    RFC1918 private networks, and lateral movement)"
     dim "  • Audit logging via auditd (monitors all process execution)"
     dim "  • Cron-based network anomaly detection (alerts on suspicious connections)"
     dim "  • Per-agent sandboxing (double containerization)"
-    dim "Best for: Untrusted networks, high-security environments"
+    dim "Can impact browser/nodes/channels depending on network policy and sandbox settings."
+    dim "Best for: Untrusted networks, high-security environments with accepted feature trade-offs."
     warn "Modifies host firewall (nftables) and installs audit monitoring"
     echo
     menu_select \
         "Select security tier" \
         "2" \
-        "1|Standard — basic rootless isolation" \
-        "2|Hardened — recommended" \
-        "3|Paranoid — maximum isolation"
+        "1|Standard — baseline compatibility" \
+        "2|Balanced — secure + full-feature (recommended)" \
+        "3|Hardened (strict) — restrictive profile" \
+        "4|Paranoid — maximum isolation"
     SECURITY_LEVEL="${MENU_SELECTION:-2}"
 
     case "$SECURITY_LEVEL" in
@@ -705,16 +706,20 @@ prompt_security_level() {
             info "Selected: Standard tier"
             ;;
         2)
-            SECURITY_TIER="hardened"
-            info "Selected: Hardened tier (recommended)"
+            SECURITY_TIER="balanced"
+            info "Selected: Balanced tier (recommended)"
             ;;
         3)
+            SECURITY_TIER="hardened"
+            info "Selected: Hardened (strict) tier"
+            ;;
+        4)
             SECURITY_TIER="paranoid"
             info "Selected: Paranoid tier"
             ;;
         *)
-            warn "Invalid selection, using Hardened (default)"
-            SECURITY_TIER="hardened"
+            warn "Invalid selection, using Balanced (default)"
+            SECURITY_TIER="balanced"
             ;;
     esac
 }
@@ -975,8 +980,11 @@ show_summary() {
     fi
     
     echo
-    if [[ "$SECURITY_TIER" == "paranoid" ]]; then
+    if [[ "$SECURITY_TIER" == "hardened" ]]; then
+        warn "Hardened (strict) tier may limit some OpenClaw features requiring writable ~/.openclaw paths"
+    elif [[ "$SECURITY_TIER" == "paranoid" ]]; then
         warn "Paranoid tier will modify host firewall (nftables) and install audit monitoring"
+        warn "Paranoid tier may impact browser/nodes/channels depending on network and sandbox policies"
     fi
     
     echo
@@ -1223,7 +1231,7 @@ layer6_configuration() {
     local config_file="$CONFIG_DIR/openclaw.json"
     
     if [[ "$SECURITY_TIER" == "standard" ]]; then
-        # Standard tier - loopback binding
+        # Standard tier - compatibility-first
         cat > "$config_file" << EOF
 {
   "gateway": {
@@ -1236,8 +1244,22 @@ layer6_configuration() {
   }
 }
 EOF
+    elif [[ "$SECURITY_TIER" == "balanced" ]]; then
+        # Balanced tier - secure defaults with full feature compatibility
+        cat > "$config_file" << EOF
+{
+  "gateway": {
+    "mode": "local",
+    "port": $GATEWAY_PORT,
+    "bind": "lan",
+    "auth": {
+      "mode": "token"
+    }
+  }
+}
+EOF
     elif [[ "$SECURITY_TIER" == "hardened" ]]; then
-        # Hardened tier - lan binding + restrictions
+        # Hardened strict tier - lan binding + restrictions
         cat > "$config_file" << EOF
 {
   "gateway": {
@@ -1337,12 +1359,29 @@ build_podman_args() {
     
     # Tier-specific hardening
     if [[ "$SECURITY_TIER" == "standard" ]]; then
-        # Standard: Read-write mounts for easier development
+        # Standard: Compatibility-first, writable config/workspace.
         PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="loopback"  # Localhost-only binding
+        BIND_MODE="lan"
+    elif [[ "$SECURITY_TIER" == "balanced" ]]; then
+        # Balanced: Strong container hardening while preserving full OpenClaw features.
+        PODMAN_ARGS+=(--read-only)  # Immutable root filesystem
+        # shellcheck disable=SC2054
+        PODMAN_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)
+        # shellcheck disable=SC2054
+        PODMAN_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
+        PODMAN_ARGS+=(--cap-drop=ALL)
+        PODMAN_ARGS+=(--security-opt=no-new-privileges:true)
+        [[ -n "$MEMORY_LIMIT" ]] && PODMAN_ARGS+=(--memory="$MEMORY_LIMIT")
+        [[ -n "$MEMORY_LIMIT" ]] && PODMAN_ARGS+=(--memory-swap="$MEMORY_LIMIT")
+        [[ -n "$CPU_LIMIT" ]] && PODMAN_ARGS+=(--cpus="$CPU_LIMIT")
+        [[ -n "$PID_LIMIT" ]] && PODMAN_ARGS+=(--pids-limit="$PID_LIMIT")
+        PODMAN_ARGS+=(--network=slirp4netns:allow_host_loopback=false)
+        PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
+        PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
+        BIND_MODE="lan"
     else
-        # Hardened/Paranoid: Maximum security lockdown
+        # Hardened strict / Paranoid: Maximum lockdown and workspace-only writes.
         PODMAN_ARGS+=(--read-only)  # Immutable root filesystem
         # shellcheck disable=SC2054
         PODMAN_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)  # Writable /tmp
@@ -1357,10 +1396,10 @@ build_podman_args() {
         [[ -n "$PID_LIMIT" ]] && PODMAN_ARGS+=(--pids-limit="$PID_LIMIT")
         PODMAN_ARGS+=(--network=slirp4netns:allow_host_loopback=false)  # Isolated network
         
-        # Read-only config, read-write workspace only
+        # Read-only config, read-write workspace only.
         PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:ro")
         PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="lan"  # Allow LAN binding for hardened tiers
+        BIND_MODE="lan"
     fi
     
     # Image and command
@@ -1385,12 +1424,29 @@ build_docker_args() {
     DOCKER_ARGS+=(-p "127.0.0.1:$BRIDGE_PORT:$BRIDGE_PORT")
     
     if [[ "$SECURITY_TIER" == "standard" ]]; then
-        # Standard: Read-write mounts for easier development
+        # Standard: Compatibility-first, writable config/workspace.
         DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="loopback"  # Localhost-only binding
+        BIND_MODE="lan"
+    elif [[ "$SECURITY_TIER" == "balanced" ]]; then
+        # Balanced: Strong container hardening while preserving full OpenClaw features.
+        DOCKER_ARGS+=(--read-only)
+        # shellcheck disable=SC2054
+        DOCKER_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)
+        # shellcheck disable=SC2054
+        DOCKER_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
+        DOCKER_ARGS+=(--cap-drop=ALL)
+        DOCKER_ARGS+=(--security-opt=no-new-privileges:true)
+        [[ -n "$MEMORY_LIMIT" ]] && DOCKER_ARGS+=(--memory="$MEMORY_LIMIT")
+        [[ -n "$MEMORY_LIMIT" ]] && DOCKER_ARGS+=(--memory-swap="$MEMORY_LIMIT")
+        [[ -n "$CPU_LIMIT" ]] && DOCKER_ARGS+=(--cpus="$CPU_LIMIT")
+        [[ -n "$PID_LIMIT" ]] && DOCKER_ARGS+=(--pids-limit="$PID_LIMIT")
+        DOCKER_ARGS+=(--network=bridge)
+        DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
+        DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
+        BIND_MODE="lan"
     else
-        # Hardened/Paranoid: Maximum security lockdown
+        # Hardened strict / Paranoid: Maximum lockdown and workspace-only writes.
         DOCKER_ARGS+=(--read-only)  # Immutable root filesystem
         # shellcheck disable=SC2054
         DOCKER_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)  # Writable /tmp
@@ -1962,6 +2018,14 @@ show_final_summary() {
         echo -e "  ✅ Host egress firewall (nftables)"
         echo -e "  ✅ Audit logging (auditd + cron)"
         echo -e "  ✅ Agent-level sandboxing"
+    fi
+
+    if [[ "$SECURITY_TIER" == "hardened" ]]; then
+        echo
+        warn "Hardened (strict): Some OpenClaw features may be limited by workspace-only and read-only config restrictions."
+    elif [[ "$SECURITY_TIER" == "paranoid" ]]; then
+        echo
+        warn "Paranoid: Maximum isolation can impact browser/nodes/channels due sandbox and egress restrictions."
     fi
     
     echo

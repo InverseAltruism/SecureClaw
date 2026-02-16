@@ -60,6 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/ins
 
 - The installer can fetch OpenClaw automatically (users do not need to clone OpenClaw).
 - Default flow is **Quick Secure Install** for non-technical users.
+- Quick mode uses the **Balanced** tier by default (secure + full OpenClaw compatibility).
 - Use **↑/↓ + Enter** for guided menus, or press the number key directly.
 - Press **Enter** to accept recommended secure defaults.
 - By default, SecureClaw pins OpenClaw to a reviewed commit. You can override with `--openclaw-ref <ref>`.
@@ -163,7 +164,7 @@ Running OpenClaw (or any AI coding agent) without proper isolation is **dangerou
 | 🌐 **Egress Firewall** | nftables rules block cloud metadata & RFC1918 |
 | 📊 **Audit Monitoring** | auditd + cron network anomaly detection |
 | 🏗️ **Agent Sandboxing** | Per-agent isolation with double containerization |
-| ⚡ **3 Security Tiers** | Standard → Hardened → Paranoid |
+| ⚡ **4 Security Tiers** | Standard → Balanced → Hardened (strict) → Paranoid |
 | 🔑 **Auto-generated Tokens** | Cryptographically secure 256-bit gateway tokens |
 | 🔄 **Systemd Integration** | Quadlet (Podman) or systemd service (Docker) auto-start |
 | 🖥️ **System Detection** | Auto-detects OS, architecture, RAM, CPU cores |
@@ -210,22 +211,30 @@ SecureClaw lets you choose your preferred container runtime during installation:
 
 Choose your security posture during installation:
 
-| Layer | Standard | Hardened | Paranoid |
-|-------|:--------:|:--------:|:--------:|
-| Container user isolation (rootless on supported runtimes) | ✅ | ✅ | ✅ |
-| Gateway token auth | ✅ | ✅ | ✅ |
-| Host port binding to `127.0.0.1` | ✅ | ✅ | ✅ |
-| Read-only root filesystem | ❌ | ✅ | ✅ |
-| All capabilities dropped | ❌ | ✅ | ✅ |
-| No new privileges | ❌ | ✅ | ✅ |
-| Resource limits (CPU/RAM/PIDs) | ❌ | ✅ | ✅ |
-| Workspace-only file access | ❌ | ✅ | ✅ |
-| Network isolation | ❌ | ✅ | ✅ |
-| **Host egress firewall (nftables)** | ❌ | ❌ | ✅ |
-| **Audit logging (auditd + cron)** | ❌ | ❌ | ✅ |
-| **Agent-level sandboxing** | ❌ | ❌ | ✅ |
+| Layer | Standard | Balanced (recommended) | Hardened (strict) | Paranoid |
+|-------|:--------:|:---------------------:|:-----------------:|:--------:|
+| Container user isolation (rootless on supported runtimes) | ✅ | ✅ | ✅ | ✅ |
+| Gateway token auth | ✅ | ✅ | ✅ | ✅ |
+| Host port binding to `127.0.0.1` | ✅ | ✅ | ✅ | ✅ |
+| Read-only root filesystem | ❌ | ✅ | ✅ | ✅ |
+| All capabilities dropped | ❌ | ✅ | ✅ | ✅ |
+| No new privileges | ❌ | ✅ | ✅ | ✅ |
+| Resource limits (CPU/RAM/PIDs) | ❌ | ✅ | ✅ | ✅ |
+| Writable `~/.openclaw` (channels/credentials/onboarding) | ✅ | ✅ | ❌ | ❌ |
+| Workspace-only file/tool restrictions | ❌ | ❌ | ✅ | ✅ |
+| Network isolation | ❌ | ✅ | ✅ | ✅ |
+| **Host egress firewall (nftables)** | ❌ | ❌ | ❌ | ✅ |
+| **Audit logging (auditd + cron)** | ❌ | ❌ | ❌ | ✅ |
+| **Agent-level sandboxing** | ❌ | ❌ | ❌ | ✅ |
 
-> 💡 **Recommendation:** Start with **Hardened** (default) for production deployments. Use **Paranoid** for maximum security on untrusted networks.
+> 💡 **Recommendation:** Use **Balanced** for production by default (secure + full-feature OpenClaw). Use **Hardened (strict)** or **Paranoid** only when you explicitly accept feature restrictions.
+
+### Feature Compatibility by Tier
+
+- **Standard:** Full OpenClaw compatibility with baseline container isolation.
+- **Balanced (recommended):** Full OpenClaw compatibility with strong container hardening.
+- **Hardened (strict):** Restrictive profile; features needing writes outside workspace can be impacted (for example onboarding/channel credential flows).
+- **Paranoid:** Highest lockdown; may impact browser/nodes/channels due firewall and sandbox/network constraints.
 
 ---
 
@@ -244,7 +253,7 @@ The installer will guide you through **9 interactive setup sections**:
 │  🐳 Section 2/9  Container Runtime                              │
 │     └─ Podman / Docker rootless / Docker                        │
 │  🔐 Section 3/9  Security Level                                 │
-│     └─ Standard / Hardened / Paranoid                           │
+│     └─ Standard / Balanced / Hardened (strict) / Paranoid       │
 │  📁 Section 4/9  Installation Directory                         │
 │     └─ Where to install OpenClaw                                │
 │  👤 Section 5/9  System User                                    │
@@ -319,7 +328,7 @@ Configures container with tier-appropriate security flags:
 - 🔒 Localhost-only port binding
 - 🔒 Init process (proper signal handling)
 
-**Hardened/Paranoid:**
+**Balanced/Hardened (strict)/Paranoid:**
 - 🔒 Read-only root filesystem
 - 🔒 tmpfs for writable directories
 - 🔒 All capabilities dropped (`cap-drop=ALL`)
@@ -388,16 +397,16 @@ Configures container with tier-appropriate security flags:
 
 SecureClaw defends against common attack vectors:
 
-| Attack Vector | Standard | Hardened | Paranoid | Mitigation |
-|---------------|:--------:|:--------:|:--------:|------------|
-| **Container escape** | 🟡 | 🟢 | 🟢🟢 | Rootless user namespace + capability drop |
-| **API key theft** | 🟡 | 🟢 | 🟢🟢 | Memory limits + read-only config + egress filtering |
-| **Lateral movement** | 🔴 | 🟡 | 🟢 | Network isolation + RFC1918 blocking |
-| **Cloud metadata access** | 🔴 | 🔴 | 🟢 | Nftables egress rules |
-| **Resource exhaustion** | 🔴 | 🟢 | 🟢 | CPU/memory/PID limits |
-| **Privilege escalation** | 🟡 | 🟢 | 🟢 | no-new-privileges + capability drop |
-| **Filesystem persistence** | 🔴 | 🟢 | 🟢 | Read-only root + tmpfs |
-| **Unauthorized network** | 🔴 | 🔴 | 🟢 | Audit monitoring + cron checks |
+| Attack Vector | Standard | Balanced | Hardened (strict) | Paranoid | Mitigation |
+|---------------|:--------:|:--------:|:-----------------:|:--------:|------------|
+| **Container escape** | 🟡 | 🟢 | 🟢 | 🟢🟢 | Rootless user namespace + capability drop |
+| **API key theft** | 🟡 | 🟢 | 🟢🟢 | 🟢🟢 | Resource limits + mount policy + egress filtering |
+| **Lateral movement** | 🔴 | 🟡 | 🟡 | 🟢 | Network isolation + RFC1918 blocking |
+| **Cloud metadata access** | 🔴 | 🔴 | 🔴 | 🟢 | Nftables egress rules |
+| **Resource exhaustion** | 🔴 | 🟢 | 🟢 | 🟢 | CPU/memory/PID limits |
+| **Privilege escalation** | 🟡 | 🟢 | 🟢 | 🟢 | no-new-privileges + capability drop |
+| **Filesystem persistence** | 🔴 | 🟢 | 🟢 | 🟢 | Read-only root + tmpfs |
+| **Feature compatibility** | 🟢🟢 | 🟢🟢 | 🟡 | 🔴 | Writable config vs strict workspace-only and network policies |
 
 > 🟢🟢 = Strongest · 🟢 = Strong · 🟡 = Moderate · 🔴 = Weak
 

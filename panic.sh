@@ -100,22 +100,47 @@ panic_stop_containers() {
     section "PANIC: containers"
 
     if command -v docker >/dev/null 2>&1; then
-        info "Stopping/removing root Docker container (if present)..."
-        docker rm -f openclaw >/dev/null 2>&1 || true
+        info "Stopping/removing root Docker OpenClaw containers (if present)..."
+        local docker_names=()
+        local name=""
+        while IFS= read -r name; do
+            [[ -n "$name" ]] || continue
+            docker_names+=("$name")
+        done < <(docker ps -a --format '{{.Names}}' | awk '/openclaw/ {print $0}')
+        if [[ ${#docker_names[@]} -gt 0 ]]; then
+            docker rm -f "${docker_names[@]}" >/dev/null 2>&1 || true
+        fi
     fi
 
     if [[ $USER_EXISTS -eq 1 ]]; then
         if command -v podman >/dev/null 2>&1; then
-            info "Stopping/removing rootless Podman container for $SYSTEM_USER (if present)..."
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
-                podman rm -f openclaw >/dev/null 2>&1 || true
+            info "Stopping/removing rootless Podman OpenClaw containers for $SYSTEM_USER (if present)..."
+            local podman_names=()
+            while IFS= read -r name; do
+                [[ -n "$name" ]] || continue
+                podman_names+=("$name")
+            done < <(sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+                podman ps -a --format '{{.Names}}' | awk '/openclaw/ {print $0}')
+            if [[ ${#podman_names[@]} -gt 0 ]]; then
+                sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+                    podman rm -f "${podman_names[@]}" >/dev/null 2>&1 || true
+            fi
         fi
 
         if command -v docker >/dev/null 2>&1; then
-            info "Stopping/removing rootless Docker container for $SYSTEM_USER (if present)..."
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+            info "Stopping/removing rootless Docker OpenClaw containers for $SYSTEM_USER (if present)..."
+            local rootless_docker_names=()
+            while IFS= read -r name; do
+                [[ -n "$name" ]] || continue
+                rootless_docker_names+=("$name")
+            done < <(sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
                 DOCKER_HOST="unix://$USER_RUNTIME_DIR/docker.sock" \
-                docker rm -f openclaw >/dev/null 2>&1 || true
+                docker ps -a --format '{{.Names}}' | awk '/openclaw/ {print $0}')
+            if [[ ${#rootless_docker_names[@]} -gt 0 ]]; then
+                sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+                    DOCKER_HOST="unix://$USER_RUNTIME_DIR/docker.sock" \
+                    docker rm -f "${rootless_docker_names[@]}" >/dev/null 2>&1 || true
+            fi
         fi
     fi
 }
