@@ -82,6 +82,14 @@ If `/usr/local/bin/secureclaw-uninstall` is unavailable, run `sudo bash uninstal
 
 The uninstaller removes SecureClaw-generated services, containers/images, install directories, paranoid-tier host artifacts, and (when it was created by SecureClaw) the dedicated system user plus namespace mappings. It can also purge runtime packages that were installed by SecureClaw.
 
+### Emergency PANIC Stop
+
+```bash
+sudo secureclaw-panic
+```
+
+If `/usr/local/bin/secureclaw-panic` is unavailable, run `sudo bash panic.sh` from this repo.
+
 ---
 
 ## ⚠️ Why You Need SecureClaw

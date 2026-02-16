@@ -58,6 +58,7 @@ readonly SECURECLAW_INSTALL_STATE_FILE="$SECURECLAW_STATE_DIR/install.env"
 readonly OPENCLAW_REPO_URL="https://github.com/openclaw/openclaw.git"
 readonly OPENCLAW_DEFAULT_REF="c593709d252a1efe70a8ce40d40627a35b818e46"
 readonly SECURECLAW_UNINSTALL_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/uninstall.sh"
+readonly SECURECLAW_PANIC_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/panic.sh"
 
 get_user_home() {
     local user_name="$1"
@@ -146,6 +147,32 @@ download_url_to_file() {
         wget -qO "$output_path" "$url"
         return
     fi
+    return 1
+}
+
+install_local_or_remote_script() {
+    local target_path="$1"
+    local local_path="$2"
+    local remote_url="$3"
+    local label="$4"
+
+    if [[ -f "$local_path" ]]; then
+        install -m 0755 "$local_path" "$target_path"
+        info "Installed $label command: $target_path"
+        return 0
+    fi
+
+    local tmp_script
+    tmp_script=$(mktemp "/tmp/secureclaw-${label}-XXXXXX.sh")
+    if download_url_to_file "$remote_url" "$tmp_script"; then
+        install -m 0755 "$tmp_script" "$target_path"
+        rm -f "$tmp_script"
+        info "Downloaded and installed $label command: $target_path"
+        return 0
+    fi
+
+    rm -f "$tmp_script" || true
+    warn "Could not install $label command at $target_path (local file missing and download failed)."
     return 1
 }
 
@@ -417,11 +444,15 @@ prompt_operation_mode() {
     echo "  ${BOLD}2. Uninstall SecureClaw${RESET}"
     dim "Fully revert SecureClaw artifacts, user setup, and host-level hardening"
     echo
+    echo "  ${BOLD}3. PANIC Stop (Emergency)${RESET}"
+    dim "Immediately stop OpenClaw services, containers, and related processes"
+    echo
     menu_select \
         "Select operation" \
         "1" \
         "1|Install SecureClaw" \
-        "2|Uninstall SecureClaw"
+        "2|Uninstall SecureClaw" \
+        "3|PANIC Stop (Emergency)"
     OPERATION_CHOICE="${MENU_SELECTION:-1}"
     case "$OPERATION_CHOICE" in
         1)
@@ -431,6 +462,10 @@ prompt_operation_mode() {
         2)
             OPERATION_MODE="uninstall"
             info "Selected: Uninstall"
+            ;;
+        3)
+            OPERATION_MODE="panic"
+            info "Selected: PANIC Stop"
             ;;
         *)
             warn "Invalid selection, using Install (default)"
@@ -1805,32 +1840,27 @@ EOF
 }
 
 # ============================================================================
-# LAYER 8: UNINSTALL ENTRYPOINT
+# LAYER 8: OPERATIONAL COMMANDS
 # ============================================================================
-layer8_install_uninstall_entrypoint() {
-    section "Layer 8: Uninstall Entrypoint"
+layer8_install_operational_commands() {
+    section "Layer 8: Operational Commands"
 
-    local target="/usr/local/bin/secureclaw-uninstall"
-    local local_uninstall
-    local_uninstall="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/uninstall.sh"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    if [[ -f "$local_uninstall" ]]; then
-        install -m 0755 "$local_uninstall" "$target"
-        info "Installed uninstall command: $target"
-        return
-    fi
+    install_local_or_remote_script \
+        "/usr/local/bin/secureclaw-uninstall" \
+        "$script_dir/uninstall.sh" \
+        "$SECURECLAW_UNINSTALL_URL" \
+        "uninstall" || \
+        warn "You can still uninstall by running uninstall.sh from this repository."
 
-    local tmp_uninstall
-    tmp_uninstall=$(mktemp /tmp/secureclaw-uninstall-XXXXXX.sh)
-    if download_url_to_file "$SECURECLAW_UNINSTALL_URL" "$tmp_uninstall"; then
-        install -m 0755 "$tmp_uninstall" "$target"
-        rm -f "$tmp_uninstall"
-        info "Downloaded and installed uninstall command: $target"
-    else
-        rm -f "$tmp_uninstall" || true
-        warn "Could not install $target (no local uninstall.sh and download failed)."
-        warn "You can still uninstall by running uninstall.sh from this repo later."
-    fi
+    install_local_or_remote_script \
+        "/usr/local/bin/secureclaw-panic" \
+        "$script_dir/panic.sh" \
+        "$SECURECLAW_PANIC_URL" \
+        "panic" || \
+        warn "PANIC command installation failed; keep panic.sh available from this repository."
 }
 
 # ============================================================================
@@ -1899,6 +1929,10 @@ show_final_summary() {
     echo -e "${BOLD}Uninstall:${RESET}"
     echo -e "  sudo secureclaw-uninstall"
     echo -e "  # or: sudo bash uninstall.sh (from this repository)"
+    echo
+    echo -e "${BOLD}Emergency PANIC Stop:${RESET}"
+    echo -e "  sudo secureclaw-panic"
+    echo -e "  # or: sudo bash panic.sh (from this repository)"
     echo
     echo -e "${BOLD}Configuration:${RESET}"
     echo -e "  Config: $CONFIG_DIR/openclaw.json"
@@ -1980,6 +2014,30 @@ uninstall_openclaw() {
     die "Uninstall script not found locally and failed to download fallback uninstaller."
 }
 
+panic_openclaw() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local panic_script="$script_dir/panic.sh"
+
+    if [[ -f "$panic_script" ]]; then
+        exec bash "$panic_script"
+    fi
+
+    if [[ -x /usr/local/bin/secureclaw-panic ]]; then
+        exec /usr/local/bin/secureclaw-panic
+    fi
+
+    local temp_panic
+    temp_panic=$(mktemp /tmp/secureclaw-panic-XXXXXX.sh)
+    if download_url_to_file "$SECURECLAW_PANIC_URL" "$temp_panic"; then
+        chmod 700 "$temp_panic"
+        exec bash "$temp_panic"
+    fi
+
+    rm -f "$temp_panic" || true
+    die "Panic script not found locally and failed to download fallback panic script."
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -2020,6 +2078,10 @@ main() {
         uninstall_openclaw
         exit 0
     fi
+    if [[ "$OPERATION_MODE" == "panic" ]]; then
+        panic_openclaw
+        exit 0
+    fi
 
     prompt_install_profile
 
@@ -2050,7 +2112,7 @@ main() {
     layer4_firewall
     layer5_monitoring
     layer7_launch
-    layer8_install_uninstall_entrypoint
+    layer8_install_operational_commands
     write_install_manifest
     
     # Show final summary
