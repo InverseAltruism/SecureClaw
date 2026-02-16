@@ -81,6 +81,7 @@ preflight_checks() {
 
     # Check OS
     if [[ -f /etc/os-release ]]; then
+        # shellcheck source=/dev/null
         source /etc/os-release
         if [[ "$ID" != "debian" && "$ID" != "ubuntu" ]]; then
             warn "This installer is designed for Debian 12+ or Ubuntu 22.04+"
@@ -617,7 +618,9 @@ build_podman_args() {
     else
         # Hardened/Paranoid: Enhanced security
         PODMAN_ARGS+=(--read-only)
+        # shellcheck disable=SC2054
         PODMAN_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)
+        # shellcheck disable=SC2054
         PODMAN_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
         PODMAN_ARGS+=(--cap-drop=ALL)
         PODMAN_ARGS+=(--security-opt=no-new-privileges:true)
