@@ -497,8 +497,7 @@ layer1_system_setup() {
             source /etc/os-release
             curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
             chmod a+r /etc/apt/keyrings/docker.asc
-            # shellcheck disable=SC1091
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list
             apt-get update -qq
             apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-ce-rootless-extras >/dev/null 2>&1 || \
                 die "Failed to install Docker CE"
@@ -517,8 +516,7 @@ layer1_system_setup() {
             source /etc/os-release
             curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
             chmod a+r /etc/apt/keyrings/docker.asc
-            # shellcheck disable=SC1091
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list
             apt-get update -qq
             apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin >/dev/null 2>&1 || \
                 die "Failed to install Docker CE"
@@ -1198,7 +1196,7 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock
 ExecStartPre=-/usr/bin/docker rm -f openclaw
-ExecStart=/usr/bin/docker run -d$docker_run_args
+ExecStart=/usr/bin/docker run -d $docker_run_args
 ExecStop=/usr/bin/docker stop openclaw
 ExecStopPost=-/usr/bin/docker rm openclaw
 
@@ -1236,7 +1234,7 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=-/usr/bin/docker rm -f openclaw
-ExecStart=/usr/bin/docker run -d$docker_run_args
+ExecStart=/usr/bin/docker run -d $docker_run_args
 ExecStop=/usr/bin/docker stop openclaw
 ExecStopPost=-/usr/bin/docker rm openclaw
 
