@@ -656,7 +656,7 @@ layer1_system_setup() {
             ((retries++))
         done
         if [[ ! -S "$docker_sock" ]]; then
-            die "Docker rootless socket not found at $docker_sock after 30s. Is the daemon running?"
+            die "Docker rootless socket not found at $docker_sock after 30s. Check logs with: sudo -u $SYSTEM_USER journalctl --user -u docker"
         fi
         info "Docker rootless socket is ready"
     fi
