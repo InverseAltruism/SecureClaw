@@ -6,7 +6,7 @@
 
 <br>
 
-```ascii
+```
    ____                           ____ _               
   / ___|  ___  ___ _   _ _ __ ___|  _ \ | __ ___      __
   \___ \ / _ \/ __| | | | '__/ _ \ |_) | |/ _` \ \ /\ / /
@@ -308,7 +308,6 @@ Configures container with tier-appropriate security flags:
 <br>
 
 - ✅ Installs and configures nftables egress filtering
-- ✅ Blocks cloud metadata endpoints (169.254.0.0/16)
 - ✅ Blocks cloud metadata endpoints (169.254.0.0/16)
 - ✅ Blocks RFC1918 private networks (lateral movement prevention)
 - ✅ Allows only DNS, HTTPS (443), and established connections
