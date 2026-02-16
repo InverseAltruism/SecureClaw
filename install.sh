@@ -771,45 +771,46 @@ build_podman_args() {
     
     # Base args for all tiers
     PODMAN_ARGS+=(--name openclaw)
-    PODMAN_ARGS+=(--init)
-    PODMAN_ARGS+=(--userns=keep-id)
+    PODMAN_ARGS+=(--init)  # Proper signal handling and zombie reaping
+    PODMAN_ARGS+=(--userns=keep-id)  # Map container UID to host user
     PODMAN_ARGS+=(--user "$USER_UID:$USER_GID")
     
     # Environment
     PODMAN_ARGS+=(-e HOME=/home/node)
     PODMAN_ARGS+=(-e TERM=xterm-256color)
     PODMAN_ARGS+=(-e "OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN")
-    PODMAN_ARGS+=(--env-file "$CONFIG_DIR/.env")
+    PODMAN_ARGS+=(--env-file "$CONFIG_DIR/.env")  # API keys from .env file
     
-    # Port publishing (localhost only)
+    # Port publishing (localhost only for security)
     PODMAN_ARGS+=(-p "127.0.0.1:$GATEWAY_PORT:$GATEWAY_PORT")
     PODMAN_ARGS+=(-p "127.0.0.1:$BRIDGE_PORT:$BRIDGE_PORT")
     
     # Tier-specific hardening
     if [[ "$SECURITY_TIER" == "standard" ]]; then
-        # Standard: RW mounts
+        # Standard: Read-write mounts for easier development
         PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="loopback"
+        BIND_MODE="loopback"  # Localhost-only binding
     else
-        # Hardened/Paranoid: Enhanced security
-        PODMAN_ARGS+=(--read-only)
+        # Hardened/Paranoid: Maximum security lockdown
+        PODMAN_ARGS+=(--read-only)  # Immutable root filesystem
         # shellcheck disable=SC2054
-        PODMAN_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)
+        PODMAN_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)  # Writable /tmp
         # shellcheck disable=SC2054
-        PODMAN_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
-        PODMAN_ARGS+=(--cap-drop=ALL)
-        PODMAN_ARGS+=(--security-opt=no-new-privileges:true)
+        PODMAN_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)  # Cache dir
+        PODMAN_ARGS+=(--cap-drop=ALL)  # Drop all Linux capabilities
+        PODMAN_ARGS+=(--security-opt=no-new-privileges:true)  # Prevent privilege escalation
+        # Resource limits - only add if set (not empty for standard tier)
         [[ -n "$MEMORY_LIMIT" ]] && PODMAN_ARGS+=(--memory="$MEMORY_LIMIT")
         [[ -n "$MEMORY_LIMIT" ]] && PODMAN_ARGS+=(--memory-swap="$MEMORY_LIMIT")
         [[ -n "$CPU_LIMIT" ]] && PODMAN_ARGS+=(--cpus="$CPU_LIMIT")
         [[ -n "$PID_LIMIT" ]] && PODMAN_ARGS+=(--pids-limit="$PID_LIMIT")
-        PODMAN_ARGS+=(--network=slirp4netns:allow_host_loopback=false)
+        PODMAN_ARGS+=(--network=slirp4netns:allow_host_loopback=false)  # Isolated network
         
-        # RO config, RW workspace
+        # Read-only config, read-write workspace only
         PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:ro")
         PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="lan"
+        BIND_MODE="lan"  # Allow LAN binding for hardened tiers
     fi
     
     # Image and command
@@ -820,33 +821,35 @@ build_podman_args() {
 build_docker_args() {
     DOCKER_ARGS=()
     
-    # Base args
+    # Base args for all tiers
     DOCKER_ARGS+=(--name openclaw)
-    DOCKER_ARGS+=(--init)
+    DOCKER_ARGS+=(--init)  # Proper signal handling and zombie reaping
     
     # Environment
     DOCKER_ARGS+=(-e HOME=/home/node)
     DOCKER_ARGS+=(-e TERM=xterm-256color)
     DOCKER_ARGS+=(-e "OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN")
-    DOCKER_ARGS+=(--env-file "$CONFIG_DIR/.env")
+    DOCKER_ARGS+=(--env-file "$CONFIG_DIR/.env")  # API keys from .env file
     
-    # Port publishing (localhost only)
+    # Port publishing (localhost only for security)
     DOCKER_ARGS+=(-p "127.0.0.1:$GATEWAY_PORT:$GATEWAY_PORT")
     DOCKER_ARGS+=(-p "127.0.0.1:$BRIDGE_PORT:$BRIDGE_PORT")
     
     if [[ "$SECURITY_TIER" == "standard" ]]; then
+        # Standard: Read-write mounts for easier development
         DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="loopback"
+        BIND_MODE="loopback"  # Localhost-only binding
     else
-        # Hardened/Paranoid
-        DOCKER_ARGS+=(--read-only)
+        # Hardened/Paranoid: Maximum security lockdown
+        DOCKER_ARGS+=(--read-only)  # Immutable root filesystem
         # shellcheck disable=SC2054
-        DOCKER_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)
+        DOCKER_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)  # Writable /tmp
         # shellcheck disable=SC2054
-        DOCKER_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
-        DOCKER_ARGS+=(--cap-drop=ALL)
-        DOCKER_ARGS+=(--security-opt=no-new-privileges:true)
+        DOCKER_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)  # Cache dir
+        DOCKER_ARGS+=(--cap-drop=ALL)  # Drop all Linux capabilities
+        DOCKER_ARGS+=(--security-opt=no-new-privileges:true)  # Prevent privilege escalation
+        # Resource limits - only add if set (not empty for standard tier)
         [[ -n "$MEMORY_LIMIT" ]] && DOCKER_ARGS+=(--memory="$MEMORY_LIMIT")
         [[ -n "$MEMORY_LIMIT" ]] && DOCKER_ARGS+=(--memory-swap="$MEMORY_LIMIT")
         [[ -n "$CPU_LIMIT" ]] && DOCKER_ARGS+=(--cpus="$CPU_LIMIT")
@@ -1003,6 +1006,8 @@ EOF
 USER_UID=USER_UID_PLACEHOLDER
 
 # Check for connections from openclaw UID that aren't localhost
+# NOTE: Must use grep without -q first, then pipe to grep -qv
+# Using grep -q first would suppress output before the second grep
 if ss -tunp 2>/dev/null | grep "uid:$USER_UID" | grep -qv "127.0.0.1\|::1"; then
     logger -t openclaw-alert -p auth.crit "Suspicious network connection detected from UID $USER_UID"
 fi
