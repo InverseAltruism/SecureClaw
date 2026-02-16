@@ -800,10 +800,10 @@ build_podman_args() {
         PODMAN_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
         PODMAN_ARGS+=(--cap-drop=ALL)
         PODMAN_ARGS+=(--security-opt=no-new-privileges:true)
-        PODMAN_ARGS+=(--memory="$MEMORY_LIMIT")
-        PODMAN_ARGS+=(--memory-swap="$MEMORY_LIMIT")
-        PODMAN_ARGS+=(--cpus="$CPU_LIMIT")
-        PODMAN_ARGS+=(--pids-limit="$PID_LIMIT")
+        [[ -n "$MEMORY_LIMIT" ]] && PODMAN_ARGS+=(--memory="$MEMORY_LIMIT")
+        [[ -n "$MEMORY_LIMIT" ]] && PODMAN_ARGS+=(--memory-swap="$MEMORY_LIMIT")
+        [[ -n "$CPU_LIMIT" ]] && PODMAN_ARGS+=(--cpus="$CPU_LIMIT")
+        [[ -n "$PID_LIMIT" ]] && PODMAN_ARGS+=(--pids-limit="$PID_LIMIT")
         PODMAN_ARGS+=(--network=slirp4netns:allow_host_loopback=false)
         
         # RO config, RW workspace
@@ -847,10 +847,10 @@ build_docker_args() {
         DOCKER_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
         DOCKER_ARGS+=(--cap-drop=ALL)
         DOCKER_ARGS+=(--security-opt=no-new-privileges:true)
-        DOCKER_ARGS+=(--memory="$MEMORY_LIMIT")
-        DOCKER_ARGS+=(--memory-swap="$MEMORY_LIMIT")
-        DOCKER_ARGS+=(--cpus="$CPU_LIMIT")
-        DOCKER_ARGS+=(--pids-limit="$PID_LIMIT")
+        [[ -n "$MEMORY_LIMIT" ]] && DOCKER_ARGS+=(--memory="$MEMORY_LIMIT")
+        [[ -n "$MEMORY_LIMIT" ]] && DOCKER_ARGS+=(--memory-swap="$MEMORY_LIMIT")
+        [[ -n "$CPU_LIMIT" ]] && DOCKER_ARGS+=(--cpus="$CPU_LIMIT")
+        [[ -n "$PID_LIMIT" ]] && DOCKER_ARGS+=(--pids-limit="$PID_LIMIT")
         
         # User mapping for standard Docker
         if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
@@ -1003,13 +1003,13 @@ EOF
 USER_UID=USER_UID_PLACEHOLDER
 
 # Check for connections from openclaw UID that aren't localhost
-if ss -tunp 2>/dev/null | grep -q "uid:$USER_UID" | grep -v "127.0.0.1\|::1"; then
+if ss -tunp 2>/dev/null | grep "uid:$USER_UID" | grep -qv "127.0.0.1\|::1"; then
     logger -t openclaw-alert -p auth.crit "Suspicious network connection detected from UID $USER_UID"
 fi
 NETCHECK_SCRIPT
     
     # Replace placeholder
-    sed -i "s/USER_UID_PLACEHOLDER/$USER_UID/" /usr/local/bin/openclaw-netcheck.sh
+    sed -i "s|USER_UID_PLACEHOLDER|$USER_UID|" /usr/local/bin/openclaw-netcheck.sh
     chmod +x /usr/local/bin/openclaw-netcheck.sh
     
     # Install cron job

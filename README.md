@@ -6,7 +6,7 @@
 
 <br>
 
-```
+```ascii
    ____                           ____ _               
   / ___|  ___  ___ _   _ _ __ ___|  _ \ | __ ___      __
   \___ \ / _ \/ __| | | | '__/ _ \ |_) | |/ _` \ \ /\ / /
@@ -26,13 +26,21 @@
 
 ---
 
-[Features](#-features) · [Quick Start](#-quick-start) · [Security Tiers](#-security-tiers) · [Why Secure?](#%EF%B8%8F-why-you-need-secureclaw) · [Post-Install](#-post-install) · [Contributing](#-contributing)
+<p align="center">
+  <a href="#-features">Features</a> •
+  <a href="#-quick-start">Quick Start</a> •
+  <a href="#-security-tiers">Security Tiers</a> •
+  <a href="#%EF%B8%8F-why-you-need-secureclaw">Why Secure?</a> •
+  <a href="#-what-the-installer-does">How It Works</a> •
+  <a href="#-post-install">Post-Install</a> •
+  <a href="#-contributing">Contributing</a>
+</p>
 
 </div>
 
 ---
 
-## What is SecureClaw?
+## 📖 What is SecureClaw?
 
 **SecureClaw** is an interactive hardened installer that deploys [OpenClaw](https://github.com/openclaw/openclaw) inside a **rootless container** with **7 layers of defense-in-depth security**.
 
@@ -181,30 +189,54 @@ Choose your security posture during installation:
 
 ## 🚀 Quick Start
 
+### Installation
+
 ```bash
+# Clone the repository
 git clone https://github.com/InverseAltruism/SecureClaw.git
 cd SecureClaw
+
+# Make installer executable
 chmod +x install.sh
+
+# Run the installer with sudo
 sudo bash install.sh
 ```
 
+### Interactive Setup
+
 The installer will guide you through **9 interactive setup sections**:
 
+<div align="center">
+
 ```
-  ┌─────────────────────────────────────────────┐
-  │  Section 1/9  System Information            │  Auto-detected OS, RAM, CPUs
-  │  Section 2/9  Container Runtime             │  Podman / Docker rootless / Docker
-  │  Section 3/9  Security Level                │  Standard / Hardened / Paranoid
-  │  Section 4/9  Installation Directory        │  Where to install OpenClaw
-  │  Section 5/9  System User                   │  Dedicated service user
-  │  Section 6/9  Gateway Port & Token          │  Network port + auth token
-  │  Section 7/9  API Keys                      │  LLM provider keys (optional)
-  │  Section 8/9  Systemd Auto-Start            │  Boot persistence
-  │  Section 9/9  Resource Limits               │  CPU/RAM/PID constraints
-  └─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    INSTALLATION WORKFLOW                        │
+├─────────────────────────────────────────────────────────────────┤
+│  📊 Section 1/9  System Information                             │
+│     └─ Auto-detected OS, RAM, CPUs                              │
+│  🐳 Section 2/9  Container Runtime                              │
+│     └─ Podman / Docker rootless / Docker                        │
+│  🔐 Section 3/9  Security Level                                 │
+│     └─ Standard / Hardened / Paranoid                           │
+│  📁 Section 4/9  Installation Directory                         │
+│     └─ Where to install OpenClaw                                │
+│  👤 Section 5/9  System User                                    │
+│     └─ Dedicated service user                                   │
+│  🌐 Section 6/9  Gateway Port & Token                           │
+│     └─ Network port + auth token                                │
+│  🔑 Section 7/9  API Keys                                       │
+│     └─ LLM provider keys (optional)                             │
+│  ⚙️  Section 8/9  Systemd Auto-Start                            │
+│     └─ Boot persistence                                         │
+│  💾 Section 9/9  Resource Limits                                │
+│     └─ CPU/RAM/PID constraints                                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-Default choices are optimized for security. Just press Enter to accept them.
+</div>
+
+> **💡 Tip:** Default choices are optimized for security. Just press **Enter** to accept them.
 
 ---
 
@@ -222,49 +254,108 @@ Default choices are optimized for security. Just press Enter to accept them.
 
 ## 🏗️ What the Installer Does
 
-The installer implements **7 layers of security**:
+The installer implements **7 layers of defense-in-depth security**:
 
-### Layer 1: System User & Dependencies
-- Installs your chosen runtime (Podman or Docker) and required tools
-- For Docker rootless: sets up `dockerd-rootless-setuptool.sh`
-- Creates dedicated `openclaw` system user (no shell, no sudo)
-- Configures subuid/subgid mappings for user namespace isolation
-- Enables systemd linger for rootless container persistence
+<details open>
+<summary><b>🔧 Layer 1: System User & Dependencies</b></summary>
 
-### Layer 2: Container Image
-- Discovers or clones the OpenClaw repository
-- Builds OpenClaw container image using official Dockerfile
-- Transfers image to the user's rootless store (Podman/Docker rootless)
-- Ensures proper XDG_RUNTIME_DIR setup
+<br>
 
-### Layer 3: Container Hardening
-- Configures container with tier-appropriate security flags:
-  - **All tiers:** Rootless userns, localhost-only port binding, init process
-  - **Hardened/Paranoid:** Read-only root, tmpfs for writable dirs, capability drop, memory/CPU/PID limits, network isolation
-- Runtime-specific optimizations for both Podman and Docker
+- ✅ Installs your chosen runtime (Podman or Docker) and required tools
+- ✅ For Docker rootless: sets up `dockerd-rootless-setuptool.sh`
+- ✅ Creates dedicated `openclaw` system user (no shell, no sudo)
+- ✅ Configures subuid/subgid mappings for user namespace isolation
+- ✅ Enables systemd linger for rootless container persistence
 
-### Layer 4: Host Firewall *(Paranoid only)*
-- Installs and configures nftables egress filtering
-- Blocks cloud metadata endpoints (169.254.0.0/16)
-- Blocks RFC1918 private networks (lateral movement prevention)
-- Allows only DNS, HTTPS (443), and established connections
+</details>
 
-### Layer 5: Monitoring *(Paranoid only)*
-- Installs auditd and adds syscall monitoring rules
-- Watches all process execution from openclaw UID
-- Cron job checks for unauthorized network connections every minute
+<details open>
+<summary><b>📦 Layer 2: Container Image</b></summary>
 
-### Layer 6: Configuration
-- Generates `.env` file with gateway token and API keys (mode 600)
-- Creates `openclaw.json` with tier-specific security settings
-- Creates workspace directory structure with proper permissions
+<br>
 
-### Layer 7: Systemd & Launch
-- **Podman:** Creates systemd Quadlet unit for auto-start
-- **Docker rootless:** Creates user-level systemd service
-- **Docker standard:** Creates system-level systemd service
-- Generates `launch-openclaw.sh` helper script
-- Starts the container and verifies successful launch
+- ✅ Discovers or clones the OpenClaw repository
+- ✅ Builds OpenClaw container image using official Dockerfile
+- ✅ Transfers image to the user's rootless store (Podman/Docker rootless)
+- ✅ Ensures proper XDG_RUNTIME_DIR setup
+
+</details>
+
+<details open>
+<summary><b>🛡️ Layer 3: Container Hardening</b></summary>
+
+<br>
+
+Configures container with tier-appropriate security flags:
+
+**All tiers:**
+- 🔒 Rootless user namespace isolation
+- 🔒 Localhost-only port binding
+- 🔒 Init process (proper signal handling)
+
+**Hardened/Paranoid:**
+- 🔒 Read-only root filesystem
+- 🔒 tmpfs for writable directories
+- 🔒 All capabilities dropped (`cap-drop=ALL`)
+- 🔒 Memory/CPU/PID limits
+- 🔒 Network isolation
+
+</details>
+
+<details open>
+<summary><b>🔥 Layer 4: Host Firewall</b> <i>(Paranoid only)</i></summary>
+
+<br>
+
+- ✅ Installs and configures nftables egress filtering
+- ✅ Blocks cloud metadata endpoints (169.254.0.0/16)
+- ✅ Blocks cloud metadata endpoints (169.254.0.0/16)
+- ✅ Blocks RFC1918 private networks (lateral movement prevention)
+- ✅ Allows only DNS, HTTPS (443), and established connections
+
+</details>
+
+<details open>
+<summary><b>📊 Layer 5: Monitoring</b> <i>(Paranoid only)</i></summary>
+
+<br>
+
+- ✅ Installs auditd and adds syscall monitoring rules
+- ✅ Watches all process execution from openclaw UID
+- ✅ Cron job checks for unauthorized network connections every minute
+
+</details>
+
+<details open>
+<summary><b>⚙️ Layer 6: Configuration</b></summary>
+
+<br>
+
+- ✅ Generates `.env` file with gateway token and API keys (mode 600)
+- ✅ Creates `openclaw.json` with tier-specific security settings
+- ✅ Creates workspace directory structure with proper permissions
+
+</details>
+
+<details open>
+<summary><b>🚀 Layer 7: Systemd & Launch</b></summary>
+
+<br>
+
+**Podman:**
+- ✅ Creates systemd Quadlet unit for auto-start
+
+**Docker rootless:**
+- ✅ Creates user-level systemd service
+
+**Docker standard:**
+- ✅ Creates system-level systemd service
+
+**All runtimes:**
+- ✅ Generates `launch-openclaw.sh` helper script
+- ✅ Starts the container and verifies successful launch
+
+</details>
 
 ---
 
@@ -289,21 +380,23 @@ SecureClaw defends against common attack vectors:
 
 ## 📡 Post-Install
 
-### Access the Dashboard
+### 🌐 Access the Dashboard
 
-SecureClaw binds to `127.0.0.1` only. Access via SSH tunnel:
+SecureClaw binds to `127.0.0.1` only for security. Access it via SSH tunnel:
 
 ```bash
-# From your local machine
+# From your local machine, create an SSH tunnel
 ssh -L 18789:127.0.0.1:18789 user@your-vps-ip
 
-# Then open in browser
+# Then open in your browser
 http://localhost:18789
 ```
 
-**Gateway Token:** Displayed in the installer output. Save it securely!
+> 🔑 **Important:** Your gateway token was displayed during installation. Save it securely - you'll need it to authenticate!
 
-### View Logs
+---
+
+### 📋 View Logs
 
 <details>
 <summary><b>Podman</b></summary>
@@ -341,7 +434,9 @@ docker logs -f openclaw
 ```
 </details>
 
-### Stop/Restart
+---
+
+### 🔄 Stop/Restart
 
 <details>
 <summary><b>Podman / Docker (rootless)</b></summary>
@@ -361,7 +456,9 @@ systemctl start openclaw
 ```
 </details>
 
-### Paranoid Tier: Monitor Threats
+---
+
+### 🔍 Paranoid Tier: Monitor Threats
 
 ```bash
 # View blocked network attempts
