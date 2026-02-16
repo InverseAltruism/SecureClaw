@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # SecureClaw Installer
-# Interactive hardened deployment for OpenClaw in rootless Podman
+# Interactive hardened deployment for OpenClaw in rootless Podman or Docker
 # Copyright © 2025 SecureClaw Contributors - MIT License
 
 # ============================================================================
@@ -68,6 +68,110 @@ show_banner() {
 EOF
     echo -e "${RESET}"
     echo
+}
+
+# ============================================================================
+# SYSTEM INFO & CONTAINER RUNTIME PROMPTS
+# ============================================================================
+prompt_system_info() {
+    section "Section 1/9: System Information"
+
+    # Detect OS
+    local os_name="Unknown"
+    local os_version="Unknown"
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck source=/dev/null
+        source /etc/os-release
+        os_name="${NAME:-Unknown}"
+        os_version="${VERSION:-${VERSION_ID:-Unknown}}"
+    fi
+
+    # Detect architecture
+    local arch
+    arch=$(uname -m)
+
+    # Detect RAM
+    local total_ram="Unknown"
+    if [[ -f /proc/meminfo ]]; then
+        local mem_kb
+        mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+        total_ram="$((mem_kb / 1024)) MB"
+    elif command -v free &>/dev/null; then
+        total_ram=$(free -h | awk '/^Mem:/ {print $2}')
+    fi
+
+    # Detect CPU cores
+    local cpu_cores="Unknown"
+    if command -v nproc &>/dev/null; then
+        cpu_cores=$(nproc)
+    fi
+
+    # Detect existing runtimes
+    local runtimes=""
+    if command -v podman &>/dev/null; then
+        runtimes+="podman ($(podman --version 2>/dev/null | awk '{print $NF}')) "
+    fi
+    if command -v docker &>/dev/null; then
+        runtimes+="docker ($(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')) "
+    fi
+    if [[ -z "$runtimes" ]]; then
+        runtimes="none detected"
+    fi
+
+    echo -e "${BOLD}${CYAN}╔════════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║${RESET}  ${BOLD}System Information${RESET}                                              ${BOLD}${CYAN}║${RESET}"
+    echo -e "${BOLD}${CYAN}╠════════════════════════════════════════════════════════════════════╣${RESET}"
+    printf "${BOLD}${CYAN}║${RESET}  %-16s %-48s ${BOLD}${CYAN}║${RESET}\n" "OS:" "$os_name $os_version"
+    printf "${BOLD}${CYAN}║${RESET}  %-16s %-48s ${BOLD}${CYAN}║${RESET}\n" "Architecture:" "$arch"
+    printf "${BOLD}${CYAN}║${RESET}  %-16s %-48s ${BOLD}${CYAN}║${RESET}\n" "Total RAM:" "$total_ram"
+    printf "${BOLD}${CYAN}║${RESET}  %-16s %-48s ${BOLD}${CYAN}║${RESET}\n" "CPU Cores:" "$cpu_cores"
+    printf "${BOLD}${CYAN}║${RESET}  %-16s %-48s ${BOLD}${CYAN}║${RESET}\n" "Runtimes:" "$runtimes"
+    echo -e "${BOLD}${CYAN}╚════════════════════════════════════════════════════════════════════╝${RESET}"
+    echo
+
+    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Does this look correct? [Y/n]:${RESET} ")" -r SYS_CONFIRM
+    SYS_CONFIRM=${SYS_CONFIRM:-Y}
+    if [[ ! "$SYS_CONFIRM" =~ ^[Yy]$ && "$SYS_CONFIRM" != "" ]]; then
+        warn "Continuing anyway — you can adjust settings in the following steps"
+    fi
+    info "System info recorded"
+}
+
+prompt_container_runtime() {
+    section "Section 2/9: Container Runtime"
+    echo
+    echo "Choose your container runtime:"
+    echo
+    echo "  ${BOLD}1. Podman (rootless)${RESET} — Default, recommended for maximum security"
+    dim "No daemon, no Docker socket, rootless by default"
+    echo
+    echo "  ${BOLD}2. Docker (rootless)${RESET} — Good security, familiar tooling"
+    dim "No root daemon, user-namespace isolation"
+    echo
+    echo "  ${BOLD}3. Docker (standard + hardened)${RESET} — Standard Docker with hardening flags"
+    dim "Root daemon present, but container hardened with all security flags"
+    echo
+    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Select runtime [1/2/3]:${RESET} ")" -r RUNTIME_CHOICE
+    RUNTIME_CHOICE=${RUNTIME_CHOICE:-1}
+
+    case "$RUNTIME_CHOICE" in
+        1)
+            CONTAINER_RUNTIME="podman"
+            info "Selected: Podman (rootless)"
+            ;;
+        2)
+            CONTAINER_RUNTIME="docker-rootless"
+            info "Selected: Docker (rootless)"
+            ;;
+        3)
+            CONTAINER_RUNTIME="docker"
+            info "Selected: Docker (standard + hardened)"
+            ;;
+        *)
+            warn "Invalid selection, using Podman (default)"
+            CONTAINER_RUNTIME="podman"
+            ;;
+    esac
 }
 
 # ============================================================================
@@ -163,7 +267,7 @@ discover_openclaw_repo() {
 # INTERACTIVE PROMPTS
 # ============================================================================
 prompt_security_level() {
-    section "Section 1/7: Security Level"
+    section "Section 3/9: Security Level"
     echo
     echo "Choose your security tier:"
     echo
@@ -200,7 +304,7 @@ prompt_security_level() {
 }
 
 prompt_install_dir() {
-    section "Section 2/7: Installation Directory"
+    section "Section 4/9: Installation Directory"
     echo
     read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Install directory:${RESET} ")" -r -i "/home/openclaw/.openclaw" -e INSTALL_DIR
     INSTALL_DIR=${INSTALL_DIR:-/home/openclaw/.openclaw}
@@ -213,7 +317,7 @@ prompt_install_dir() {
 }
 
 prompt_username() {
-    section "Section 3/7: System User"
+    section "Section 5/9: System User"
     echo
     read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}System username:${RESET} ")" -r -i "openclaw" -e SYSTEM_USER
     SYSTEM_USER=${SYSTEM_USER:-openclaw}
@@ -221,7 +325,7 @@ prompt_username() {
 }
 
 prompt_ports() {
-    section "Section 4/7: Gateway Port"
+    section "Section 6/9: Gateway Port"
     echo
     read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Gateway port:${RESET} ")" -r -i "18789" -e GATEWAY_PORT
     GATEWAY_PORT=${GATEWAY_PORT:-18789}
@@ -241,7 +345,7 @@ prompt_token() {
 }
 
 prompt_api_keys() {
-    section "Section 5/7: API Keys (optional)"
+    section "Section 7/9: API Keys (optional)"
     echo
     dim "Press Enter to skip any key"
     echo
@@ -281,13 +385,21 @@ prompt_api_keys() {
 }
 
 prompt_systemd() {
-    section "Section 6/7: Systemd Auto-Start"
+    section "Section 8/9: Systemd Auto-Start"
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Enable systemd Quadlet for auto-start? [Y/n]:${RESET} ")" -r ENABLE_SYSTEMD
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Enable systemd Quadlet for auto-start? [Y/n]:${RESET} ")" -r ENABLE_SYSTEMD
+    else
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Enable systemd service for auto-start? [Y/n]:${RESET} ")" -r ENABLE_SYSTEMD
+    fi
     ENABLE_SYSTEMD=${ENABLE_SYSTEMD:-Y}
     if [[ "$ENABLE_SYSTEMD" =~ ^[Yy]$ || "$ENABLE_SYSTEMD" == "" ]]; then
         ENABLE_SYSTEMD=1
-        info "Systemd Quadlet will be configured"
+        if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+            info "Systemd Quadlet will be configured"
+        else
+            info "Systemd service will be configured"
+        fi
     else
         ENABLE_SYSTEMD=0
         info "Manual start only"
@@ -302,7 +414,7 @@ prompt_resource_limits() {
         return
     fi
 
-    section "Section 7/7: Resource Limits"
+    section "Section 9/9: Resource Limits"
     echo
     read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Memory limit:${RESET} ")" -r -i "2g" -e MEMORY_LIMIT
     MEMORY_LIMIT=${MEMORY_LIMIT:-2g}
@@ -320,6 +432,7 @@ prompt_resource_limits() {
 show_summary() {
     section "Configuration Summary"
     echo
+    echo -e "${BOLD}Container Runtime:${RESET}   $CONTAINER_RUNTIME"
     echo -e "${BOLD}Security Tier:${RESET}       $SECURITY_TIER"
     echo -e "${BOLD}Install Directory:${RESET}   $INSTALL_DIR"
     echo -e "${BOLD}System User:${RESET}         $SYSTEM_USER"
@@ -369,9 +482,48 @@ layer1_system_setup() {
     
     # Install dependencies
     info "Installing dependencies..."
-    apt-get update -qq
-    apt-get install -y -qq podman uidmap slirp4netns git >/dev/null 2>&1 || \
-        die "Failed to install dependencies"
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        apt-get update -qq
+        apt-get install -y -qq podman uidmap slirp4netns git >/dev/null 2>&1 || \
+            die "Failed to install dependencies"
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        apt-get update -qq
+        apt-get install -y -qq ca-certificates curl gnupg git uidmap slirp4netns >/dev/null 2>&1 || \
+            die "Failed to install base dependencies"
+        if ! command -v docker &>/dev/null; then
+            info "Installing Docker CE..."
+            install -m 0755 -d /etc/apt/keyrings
+            # shellcheck source=/dev/null
+            source /etc/os-release
+            curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
+            chmod a+r /etc/apt/keyrings/docker.asc
+            # shellcheck disable=SC1091
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+            apt-get update -qq
+            apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-ce-rootless-extras >/dev/null 2>&1 || \
+                die "Failed to install Docker CE"
+        else
+            apt-get install -y -qq docker-ce-rootless-extras uidmap slirp4netns >/dev/null 2>&1 || \
+                die "Failed to install Docker rootless extras"
+        fi
+    elif [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
+        apt-get update -qq
+        apt-get install -y -qq ca-certificates curl gnupg git >/dev/null 2>&1 || \
+            die "Failed to install base dependencies"
+        if ! command -v docker &>/dev/null; then
+            info "Installing Docker CE..."
+            install -m 0755 -d /etc/apt/keyrings
+            # shellcheck source=/dev/null
+            source /etc/os-release
+            curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
+            chmod a+r /etc/apt/keyrings/docker.asc
+            # shellcheck disable=SC1091
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+            apt-get update -qq
+            apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin >/dev/null 2>&1 || \
+                die "Failed to install Docker CE"
+        fi
+    fi
     
     # Create system user
     if ! id "$SYSTEM_USER" &>/dev/null; then
@@ -387,20 +539,24 @@ layer1_system_setup() {
     USER_GID=$(id -g "$SYSTEM_USER")
     USER_HOME=$(eval echo "~$SYSTEM_USER")
     
-    # Enable linger
-    info "Enabling systemd linger for $SYSTEM_USER"
-    loginctl enable-linger "$SYSTEM_USER" || \
-        warn "Failed to enable linger (non-fatal)"
-    
-    # Configure subuid/subgid
-    if ! grep -q "^$SYSTEM_USER:" /etc/subuid; then
-        info "Configuring subuid mapping"
-        echo "$SYSTEM_USER:100000:65536" >> /etc/subuid
+    # Enable linger (needed for rootless runtimes)
+    if [[ "$CONTAINER_RUNTIME" != "docker" ]]; then
+        info "Enabling systemd linger for $SYSTEM_USER"
+        loginctl enable-linger "$SYSTEM_USER" || \
+            warn "Failed to enable linger (non-fatal)"
     fi
     
-    if ! grep -q "^$SYSTEM_USER:" /etc/subgid; then
-        info "Configuring subgid mapping"
-        echo "$SYSTEM_USER:100000:65536" >> /etc/subgid
+    # Configure subuid/subgid (needed for rootless runtimes)
+    if [[ "$CONTAINER_RUNTIME" != "docker" ]]; then
+        if ! grep -q "^$SYSTEM_USER:" /etc/subuid; then
+            info "Configuring subuid mapping"
+            echo "$SYSTEM_USER:100000:65536" >> /etc/subuid
+        fi
+        
+        if ! grep -q "^$SYSTEM_USER:" /etc/subgid; then
+            info "Configuring subgid mapping"
+            echo "$SYSTEM_USER:100000:65536" >> /etc/subgid
+        fi
     fi
     
     # Ensure XDG_RUNTIME_DIR exists
@@ -410,6 +566,14 @@ layer1_system_setup() {
         mkdir -p "$XDG_RUNTIME_DIR"
         chown "$SYSTEM_USER:$SYSTEM_USER" "$XDG_RUNTIME_DIR"
         chmod 700 "$XDG_RUNTIME_DIR"
+    fi
+    
+    # Set up Docker rootless for the user
+    if [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        info "Setting up Docker rootless for $SYSTEM_USER..."
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            dockerd-rootless-setuptool.sh install || \
+            die "Failed to set up Docker rootless"
     fi
     
     info "Layer 1 complete"
@@ -425,22 +589,36 @@ layer2_container_image() {
     OPENCLAW_PATH=$(discover_openclaw_repo)
     
     info "Building OpenClaw image from $OPENCLAW_PATH..."
-    podman build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
-        die "Failed to build container image"
     
-    # Save and load into user's rootless store
-    info "Transferring image to $SYSTEM_USER's rootless store..."
-    local tmp_image="/tmp/openclaw-image-$$.tar"
-    podman save -o "$tmp_image" openclaw:local || \
-        die "Failed to save image"
-    
-    # Load as user
-    sudo -u "$SYSTEM_USER" \
-        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-        podman load -i "$tmp_image" || \
-        die "Failed to load image into user store"
-    
-    rm -f "$tmp_image"
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        podman build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
+            die "Failed to build container image"
+        
+        # Save and load into user's rootless store
+        info "Transferring image to $SYSTEM_USER's rootless store..."
+        local tmp_image="/tmp/openclaw-image-$$.tar"
+        podman save -o "$tmp_image" openclaw:local || \
+            die "Failed to save image"
+        
+        # Load as user
+        sudo -u "$SYSTEM_USER" \
+            XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            podman load -i "$tmp_image" || \
+            die "Failed to load image into user store"
+        
+        rm -f "$tmp_image"
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        # Build as user using rootless docker
+        sudo -u "$SYSTEM_USER" \
+            XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock" \
+            docker build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
+            die "Failed to build container image"
+    else
+        # Standard Docker build
+        docker build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
+            die "Failed to build container image"
+    fi
     
     # Cleanup temp repo if we cloned it
     if [[ -n "${OPENCLAW_REPO_TEMP:-}" ]]; then
@@ -641,11 +819,68 @@ build_podman_args() {
     PODMAN_ARGS+=(node dist/index.js gateway --bind "$BIND_MODE" --port "$GATEWAY_PORT")
 }
 
+build_docker_args() {
+    DOCKER_ARGS=()
+    
+    # Base args
+    DOCKER_ARGS+=(--name openclaw)
+    DOCKER_ARGS+=(--init)
+    
+    # Environment
+    DOCKER_ARGS+=(-e HOME=/home/node)
+    DOCKER_ARGS+=(-e TERM=xterm-256color)
+    DOCKER_ARGS+=(-e "OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN")
+    DOCKER_ARGS+=(--env-file "$CONFIG_DIR/.env")
+    
+    # Port publishing (localhost only)
+    DOCKER_ARGS+=(-p "127.0.0.1:$GATEWAY_PORT:$GATEWAY_PORT")
+    DOCKER_ARGS+=(-p "127.0.0.1:$BRIDGE_PORT:$BRIDGE_PORT")
+    
+    if [[ "$SECURITY_TIER" == "standard" ]]; then
+        DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
+        DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
+        BIND_MODE="loopback"
+    else
+        # Hardened/Paranoid
+        DOCKER_ARGS+=(--read-only)
+        # shellcheck disable=SC2054
+        DOCKER_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)
+        # shellcheck disable=SC2054
+        DOCKER_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
+        DOCKER_ARGS+=(--cap-drop=ALL)
+        DOCKER_ARGS+=(--security-opt=no-new-privileges:true)
+        DOCKER_ARGS+=(--memory="$MEMORY_LIMIT")
+        DOCKER_ARGS+=(--memory-swap="$MEMORY_LIMIT")
+        DOCKER_ARGS+=(--cpus="$CPU_LIMIT")
+        DOCKER_ARGS+=(--pids-limit="$PID_LIMIT")
+        
+        # User mapping for standard Docker
+        if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
+            DOCKER_ARGS+=(--user "$(id -u "$SYSTEM_USER"):$(id -g "$SYSTEM_USER")")
+        fi
+        
+        # Network
+        DOCKER_ARGS+=(--network=bridge)
+        
+        DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:ro")
+        DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
+        BIND_MODE="lan"
+    fi
+    
+    # Image and command
+    DOCKER_ARGS+=(openclaw:local)
+    DOCKER_ARGS+=(node dist/index.js gateway --bind "$BIND_MODE" --port "$GATEWAY_PORT")
+}
+
 layer3_container_hardening() {
     section "Layer 3: Container Hardening"
     
-    build_podman_args
-    info "Container configured with $SECURITY_TIER tier security"
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        build_podman_args
+    else
+        build_docker_args
+    fi
+    info "Container configured with $SECURITY_TIER tier security ($CONTAINER_RUNTIME runtime)"
     info "Layer 3 complete"
 }
 
@@ -792,10 +1027,18 @@ EOF
 # LAYER 7: QUADLET & LAUNCH
 # ============================================================================
 layer7_launch() {
-    section "Layer 7: Systemd Quadlet & Launch"
+    section "Layer 7: Systemd & Launch"
+    
+    # Determine the runtime command
+    local runtime_cmd
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        runtime_cmd="podman"
+    else
+        runtime_cmd="docker"
+    fi
     
     # Always create launch script
-    info "Creating launch script..."
+    info "Creating launch script ($runtime_cmd)..."
     local launch_script="$INSTALL_DIR/launch-openclaw.sh"
     
     cat > "$launch_script" << 'LAUNCH_EOF'
@@ -807,28 +1050,44 @@ set -euo pipefail
 
 LAUNCH_EOF
     
-    # Add podman run command
-    echo "podman run -d \\" >> "$launch_script"
-    for arg in "${PODMAN_ARGS[@]}"; do
-        # Escape and quote arguments properly
-        echo "  \"$arg\" \\" >> "$launch_script"
-    done
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        # Podman launch
+        echo "podman run -d \\" >> "$launch_script"
+        for arg in "${PODMAN_ARGS[@]}"; do
+            echo "  \"$arg\" \\" >> "$launch_script"
+        done
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        # Docker rootless launch (needs DOCKER_HOST)
+        echo "export DOCKER_HOST=\"unix://$XDG_RUNTIME_DIR/docker.sock\"" >> "$launch_script"
+        echo "docker run -d \\" >> "$launch_script"
+        for arg in "${DOCKER_ARGS[@]}"; do
+            echo "  \"$arg\" \\" >> "$launch_script"
+        done
+    else
+        # Standard Docker launch
+        echo "docker run -d \\" >> "$launch_script"
+        for arg in "${DOCKER_ARGS[@]}"; do
+            echo "  \"$arg\" \\" >> "$launch_script"
+        done
+    fi
     # Remove trailing backslash from last line
     sed -i '$ s/ \\$//' "$launch_script"
     
     chown "$SYSTEM_USER:$SYSTEM_USER" "$launch_script"
     chmod +x "$launch_script"
     
-    # Create Quadlet unit if enabled
+    # Create systemd unit if enabled
     if [[ $ENABLE_SYSTEMD -eq 1 ]]; then
-        info "Creating systemd Quadlet unit..."
-        
-        local quadlet_dir="$USER_HOME/.config/containers/systemd"
-        sudo -u "$SYSTEM_USER" mkdir -p "$quadlet_dir"
-        
-        local quadlet_file="$quadlet_dir/openclaw.container"
-        
-        cat > "$quadlet_file" << EOF
+        if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+            # Podman Quadlet (user-level)
+            info "Creating systemd Quadlet unit..."
+            
+            local quadlet_dir="$USER_HOME/.config/containers/systemd"
+            sudo -u "$SYSTEM_USER" mkdir -p "$quadlet_dir"
+            
+            local quadlet_file="$quadlet_dir/openclaw.container"
+            
+            cat > "$quadlet_file" << EOF
 [Unit]
 Description=OpenClaw Secure Container
 After=network-online.target
@@ -855,22 +1114,22 @@ PublishPort=127.0.0.1:$BRIDGE_PORT:$BRIDGE_PORT
 
 # Volumes
 EOF
-        
-        if [[ "$SECURITY_TIER" == "standard" ]]; then
-            cat >> "$quadlet_file" << EOF
+            
+            if [[ "$SECURITY_TIER" == "standard" ]]; then
+                cat >> "$quadlet_file" << EOF
 Volume=$CONFIG_DIR:/home/node/.openclaw:rw
 Volume=$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw
 EOF
-        else
-            cat >> "$quadlet_file" << EOF
+            else
+                cat >> "$quadlet_file" << EOF
 Volume=$CONFIG_DIR:/home/node/.openclaw:ro
 Volume=$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw
 EOF
-        fi
-        
-        # Add hardened/paranoid flags
-        if [[ "$SECURITY_TIER" != "standard" ]]; then
-            cat >> "$quadlet_file" << EOF
+            fi
+            
+            # Add hardened/paranoid flags
+            if [[ "$SECURITY_TIER" != "standard" ]]; then
+                cat >> "$quadlet_file" << EOF
 
 # Security hardening
 ReadOnly=true
@@ -889,10 +1148,10 @@ PidsLimit=$PID_LIMIT
 # Network
 Network=slirp4netns:allow_host_loopback=false
 EOF
-        fi
-        
-        # Add command
-        cat >> "$quadlet_file" << EOF
+            fi
+            
+            # Add command
+            cat >> "$quadlet_file" << EOF
 
 # Command
 Exec=node dist/index.js gateway --bind $BIND_MODE --port $GATEWAY_PORT
@@ -904,29 +1163,126 @@ TimeoutStartSec=300
 [Install]
 WantedBy=default.target
 EOF
+            
+            chown "$SYSTEM_USER:$SYSTEM_USER" "$quadlet_file"
+            
+            # Reload and enable
+            info "Enabling and starting systemd service..."
+            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user daemon-reload
+            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user enable openclaw.service >/dev/null 2>&1
+            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user start openclaw.service || \
+                die "Failed to start service"
         
-        chown "$SYSTEM_USER:$SYSTEM_USER" "$quadlet_file"
+        elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+            # Docker rootless systemd unit (user-level)
+            info "Creating systemd user service for Docker rootless..."
+            
+            local user_unit_dir="$USER_HOME/.config/systemd/user"
+            sudo -u "$SYSTEM_USER" mkdir -p "$user_unit_dir"
+            
+            local unit_file="$user_unit_dir/openclaw.service"
+            
+            # Build docker run args string for ExecStart
+            local docker_run_args=""
+            for arg in "${DOCKER_ARGS[@]}"; do
+                docker_run_args+=" \"$arg\""
+            done
+            
+            cat > "$unit_file" << EOF
+[Unit]
+Description=OpenClaw Secure Container (Docker Rootless)
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock
+ExecStartPre=-/usr/bin/docker rm -f openclaw
+ExecStart=/usr/bin/docker run -d$docker_run_args
+ExecStop=/usr/bin/docker stop openclaw
+ExecStopPost=-/usr/bin/docker rm openclaw
+
+[Install]
+WantedBy=default.target
+EOF
+            
+            chown "$SYSTEM_USER:$SYSTEM_USER" "$unit_file"
+            
+            info "Enabling and starting systemd service..."
+            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user daemon-reload
+            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user enable openclaw.service >/dev/null 2>&1
+            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user start openclaw.service || \
+                die "Failed to start service"
         
-        # Reload and enable
-        info "Enabling and starting systemd service..."
-        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user daemon-reload
-        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user enable openclaw.service >/dev/null 2>&1
-        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user start openclaw.service || \
-            die "Failed to start service"
+        else
+            # Standard Docker systemd unit (system-level)
+            info "Creating system-level systemd service for Docker..."
+            
+            local unit_file="/etc/systemd/system/openclaw.service"
+            
+            # Build docker run args string for ExecStart
+            local docker_run_args=""
+            for arg in "${DOCKER_ARGS[@]}"; do
+                docker_run_args+=" \"$arg\""
+            done
+            
+            cat > "$unit_file" << EOF
+[Unit]
+Description=OpenClaw Secure Container (Docker)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/bin/docker rm -f openclaw
+ExecStart=/usr/bin/docker run -d$docker_run_args
+ExecStop=/usr/bin/docker stop openclaw
+ExecStopPost=-/usr/bin/docker rm openclaw
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            
+            info "Enabling and starting systemd service..."
+            systemctl daemon-reload
+            systemctl enable openclaw.service >/dev/null 2>&1
+            systemctl start openclaw.service || \
+                die "Failed to start service"
+        fi
     else
         # Launch directly
         info "Starting container..."
         cd "$USER_HOME"
-        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" bash "$launch_script" || \
-            die "Failed to start container"
+        if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
+            bash "$launch_script" || die "Failed to start container"
+        else
+            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" bash "$launch_script" || \
+                die "Failed to start container"
+        fi
     fi
     
     # Wait and verify
     sleep 3
-    if sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" podman ps | grep -q openclaw; then
-        info "Container started successfully"
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        if sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" podman ps | grep -q openclaw; then
+            info "Container started successfully"
+        else
+            warn "Container may not have started properly"
+        fi
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        if sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock" docker ps | grep -q openclaw; then
+            info "Container started successfully"
+        else
+            warn "Container may not have started properly"
+        fi
     else
-        warn "Container may not have started properly"
+        if docker ps | grep -q openclaw; then
+            info "Container started successfully"
+        else
+            warn "Container may not have started properly"
+        fi
     fi
     
     info "Layer 7 complete"
@@ -945,6 +1301,9 @@ show_final_summary() {
     echo -e "${BOLD}Dashboard URL:${RESET}"
     echo -e "  http://localhost:$GATEWAY_PORT"
     echo
+    echo -e "${BOLD}Container Runtime:${RESET}"
+    echo -e "  $CONTAINER_RUNTIME"
+    echo
     echo -e "${BOLD}Gateway Token:${RESET}"
     echo -e "  $GATEWAY_TOKEN"
     echo
@@ -953,19 +1312,43 @@ show_final_summary() {
     echo
     echo -e "${BOLD}View Logs:${RESET}"
     if [[ $ENABLE_SYSTEMD -eq 1 ]]; then
-        echo -e "  sudo -u $SYSTEM_USER systemctl --user status openclaw"
-        echo -e "  sudo -u $SYSTEM_USER journalctl --user -u openclaw -f"
+        if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
+            echo -e "  systemctl status openclaw"
+            echo -e "  journalctl -u openclaw -f"
+        else
+            echo -e "  sudo -u $SYSTEM_USER systemctl --user status openclaw"
+            echo -e "  sudo -u $SYSTEM_USER journalctl --user -u openclaw -f"
+        fi
     else
-        echo -e "  sudo -u $SYSTEM_USER podman logs -f openclaw"
+        if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+            echo -e "  sudo -u $SYSTEM_USER podman logs -f openclaw"
+        elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+            echo -e "  sudo -u $SYSTEM_USER DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock docker logs -f openclaw"
+        else
+            echo -e "  docker logs -f openclaw"
+        fi
     fi
     echo
     echo -e "${BOLD}Stop/Restart:${RESET}"
     if [[ $ENABLE_SYSTEMD -eq 1 ]]; then
-        echo -e "  sudo -u $SYSTEM_USER systemctl --user stop openclaw"
-        echo -e "  sudo -u $SYSTEM_USER systemctl --user start openclaw"
+        if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
+            echo -e "  systemctl stop openclaw"
+            echo -e "  systemctl start openclaw"
+        else
+            echo -e "  sudo -u $SYSTEM_USER systemctl --user stop openclaw"
+            echo -e "  sudo -u $SYSTEM_USER systemctl --user start openclaw"
+        fi
     else
-        echo -e "  sudo -u $SYSTEM_USER podman stop openclaw"
-        echo -e "  sudo -u $SYSTEM_USER podman start openclaw"
+        if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+            echo -e "  sudo -u $SYSTEM_USER podman stop openclaw"
+            echo -e "  sudo -u $SYSTEM_USER podman start openclaw"
+        elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+            echo -e "  sudo -u $SYSTEM_USER DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock docker stop openclaw"
+            echo -e "  sudo -u $SYSTEM_USER DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock docker start openclaw"
+        else
+            echo -e "  docker stop openclaw"
+            echo -e "  docker start openclaw"
+        fi
     fi
     echo
     echo -e "${BOLD}Configuration:${RESET}"
@@ -973,8 +1356,14 @@ show_final_summary() {
     echo -e "  API Keys: $CONFIG_DIR/.env"
     echo -e "  Workspace: $WORKSPACE_DIR"
     echo
-    echo -e "${BOLD}Active Security Layers (${SECURITY_TIER} tier):${RESET}"
-    echo -e "  ✅ Rootless Podman"
+    echo -e "${BOLD}Active Security Layers (${SECURITY_TIER} tier, ${CONTAINER_RUNTIME} runtime):${RESET}"
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        echo -e "  ✅ Rootless Podman"
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        echo -e "  ✅ Rootless Docker"
+    else
+        echo -e "  ✅ Docker (hardened)"
+    fi
     echo -e "  ✅ Gateway token authentication"
     echo -e "  ✅ Localhost-only binding"
     
@@ -1037,6 +1426,8 @@ main() {
     done
     
     # Interactive prompts
+    prompt_system_info
+    prompt_container_runtime
     prompt_security_level
     prompt_install_dir
     prompt_username
