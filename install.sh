@@ -53,6 +53,210 @@ die() {
     exit 1
 }
 
+readonly SECURECLAW_STATE_DIR="/etc/secureclaw"
+readonly SECURECLAW_INSTALL_STATE_FILE="$SECURECLAW_STATE_DIR/install.env"
+readonly OPENCLAW_REPO_URL="https://github.com/openclaw/openclaw.git"
+readonly OPENCLAW_DEFAULT_REF="c593709d252a1efe70a8ce40d40627a35b818e46"
+
+get_user_home() {
+    local user_name="$1"
+    local user_home=""
+    user_home=$(getent passwd "$user_name" | awk -F: 'NR==1 {print $6}')
+    [[ -n "$user_home" ]] || die "Unable to resolve home directory for user: $user_name"
+    echo "$user_home"
+}
+
+next_subid_start() {
+    local file_path="$1"
+    local max_end=100000
+
+    if [[ -f "$file_path" ]]; then
+        while IFS=: read -r _ start count; do
+            [[ "$start" =~ ^[0-9]+$ ]] || continue
+            [[ "$count" =~ ^[0-9]+$ ]] || continue
+            local end=$((start + count))
+            if (( end > max_end )); then
+                max_end=$end
+            fi
+        done < "$file_path"
+    fi
+
+    # Align to 65536 to avoid fragmented ranges.
+    echo $(( ((max_end + 65535) / 65536) * 65536 ))
+}
+
+write_install_manifest() {
+    mkdir -p "$SECURECLAW_STATE_DIR"
+    chmod 700 "$SECURECLAW_STATE_DIR"
+
+    cat > "$SECURECLAW_INSTALL_STATE_FILE" << EOF
+SYSTEM_USER=$SYSTEM_USER
+INSTALL_DIR=$INSTALL_DIR
+CONTAINER_RUNTIME=$CONTAINER_RUNTIME
+SECURITY_TIER=$SECURITY_TIER
+ENABLE_SYSTEMD=$ENABLE_SYSTEMD
+GATEWAY_PORT=$GATEWAY_PORT
+BRIDGE_PORT=$BRIDGE_PORT
+USER_CREATED_BY_SECURECLAW=$USER_CREATED_BY_SECURECLAW
+LINGER_ENABLED_BY_SECURECLAW=$LINGER_ENABLED_BY_SECURECLAW
+SUBUID_ADDED_BY_SECURECLAW=$SUBUID_ADDED_BY_SECURECLAW
+SUBGID_ADDED_BY_SECURECLAW=$SUBGID_ADDED_BY_SECURECLAW
+SUBUID_RANGE=${SUBUID_RANGE:-}
+SUBGID_RANGE=${SUBGID_RANGE:-}
+OPENCLAW_REF_RESOLVED=${OPENCLAW_REF_RESOLVED:-unknown}
+PACKAGES_INSTALLED_BY_SECURECLAW=${PACKAGES_INSTALLED_BY_SECURECLAW:-}
+DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW=$DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW
+DOCKER_APT_KEY_ADDED_BY_SECURECLAW=$DOCKER_APT_KEY_ADDED_BY_SECURECLAW
+EOF
+    chmod 600 "$SECURECLAW_INSTALL_STATE_FILE"
+}
+
+cpu_quota_percent_from_limit() {
+    local cpu_limit="$1"
+    awk -v c="$cpu_limit" 'BEGIN { printf "%d", (c * 100) }'
+}
+
+mark_packages_if_missing() {
+    local pkg
+    for pkg in "$@"; do
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            case " ${PACKAGES_INSTALLED_BY_SECURECLAW:-} " in
+                *" $pkg "*) ;;
+                *)
+                    if [[ -n "${PACKAGES_INSTALLED_BY_SECURECLAW:-}" ]]; then
+                        PACKAGES_INSTALLED_BY_SECURECLAW+=" "
+                    fi
+                    PACKAGES_INSTALLED_BY_SECURECLAW+="$pkg"
+                    ;;
+            esac
+        fi
+    done
+}
+
+# Install metadata flags for full uninstall/revert.
+USER_CREATED_BY_SECURECLAW=0
+LINGER_ENABLED_BY_SECURECLAW=0
+SUBUID_ADDED_BY_SECURECLAW=0
+SUBGID_ADDED_BY_SECURECLAW=0
+SUBUID_RANGE=""
+SUBGID_RANGE=""
+PACKAGES_INSTALLED_BY_SECURECLAW=""
+DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW=0
+DOCKER_APT_KEY_ADDED_BY_SECURECLAW=0
+OPENCLAW_REF_RESOLVED="unknown"
+
+MENU_SELECTION=""
+
+supports_interactive_menu() {
+    [[ -t 0 && -t 1 ]]
+}
+
+menu_select() {
+    local prompt="$1"
+    local default_value="$2"
+    shift 2
+
+    if ! supports_interactive_menu; then
+        MENU_SELECTION="$default_value"
+        return
+    fi
+
+    local -a values=()
+    local -a labels=()
+    local entry=""
+    for entry in "$@"; do
+        values+=("${entry%%|*}")
+        labels+=("${entry#*|}")
+    done
+
+    local index=0
+    local i
+    for i in "${!values[@]}"; do
+        if [[ "${values[$i]}" == "$default_value" ]]; then
+            index=$i
+            break
+        fi
+    done
+
+    local key=""
+    local key2=""
+    local lines_to_clear=0
+    while true; do
+        echo -e "${BOLD}${prompt}${RESET}"
+        for i in "${!labels[@]}"; do
+            if (( i == index )); then
+                echo -e "  ${GREEN}➤ ${labels[$i]}${RESET}"
+            else
+                echo -e "    ${labels[$i]}"
+            fi
+        done
+        echo -e "${DIM}Use ↑/↓ and press Enter.${RESET}"
+
+        IFS= read -rsn1 key || true
+        if [[ "$key" == $'\x1b' ]]; then
+            IFS= read -rsn2 -t 0.1 key2 || true
+            case "$key2" in
+                "[A")
+                    index=$(( (index - 1 + ${#labels[@]}) % ${#labels[@]} ))
+                    ;;
+                "[B")
+                    index=$(( (index + 1) % ${#labels[@]} ))
+                    ;;
+            esac
+        elif [[ "$key" =~ [0-9A-Za-z] ]]; then
+            for i in "${!values[@]}"; do
+                if [[ "${values[$i]}" == "$key" ]]; then
+                    MENU_SELECTION="${values[$i]}"
+                    return
+                fi
+            done
+        elif [[ -z "$key" || "$key" == $'\n' ]]; then
+            MENU_SELECTION="${values[$index]}"
+            break
+        fi
+
+        lines_to_clear=$(( ${#labels[@]} + 2 ))
+        for (( i=0; i<lines_to_clear; i++ )); do
+            printf '\033[1A\033[2K\r'
+        done
+    done
+}
+
+is_valid_username() {
+    local user_name="$1"
+    [[ "$user_name" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
+}
+
+is_valid_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    (( port >= 1024 && port <= 65534 ))
+}
+
+is_port_in_use() {
+    local port="$1"
+    if ! command -v ss >/dev/null 2>&1; then
+        return 1
+    fi
+    ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found ? 0 : 1)}'
+}
+
+is_valid_token() {
+    local token="$1"
+    [[ "$token" =~ ^[A-Fa-f0-9]{64}$ ]]
+}
+
+is_valid_cpu_limit() {
+    local cpu="$1"
+    [[ "$cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    awk -v c="$cpu" 'BEGIN { exit(c > 0 ? 0 : 1) }'
+}
+
+is_valid_memory_limit() {
+    local mem="$1"
+    [[ "$mem" =~ ^[0-9]+([mMgG])$ ]]
+}
+
 # ============================================================================
 # BANNER
 # ============================================================================
@@ -158,8 +362,13 @@ prompt_container_runtime() {
     dim "hardened with all security flags (cap-drop, no-new-privileges, etc.)."
     dim "Only choose this if rootless Docker/Podman is not available on your system."
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Select runtime [1/2/3] (default: 1 Podman):${RESET} ")" -r RUNTIME_CHOICE
-    RUNTIME_CHOICE=${RUNTIME_CHOICE:-1}
+    menu_select \
+        "Select runtime" \
+        "1" \
+        "1|Podman (rootless) — recommended" \
+        "2|Docker (rootless)" \
+        "3|Docker (standard + hardened)"
+    RUNTIME_CHOICE="${MENU_SELECTION:-1}"
 
     case "$RUNTIME_CHOICE" in
         1)
@@ -177,6 +386,37 @@ prompt_container_runtime() {
         *)
             warn "Invalid selection, using Podman (default)"
             CONTAINER_RUNTIME="podman"
+            ;;
+    esac
+}
+
+prompt_operation_mode() {
+    section "Select Operation"
+    echo
+    echo "  ${BOLD}1. Install SecureClaw${RESET}"
+    dim "Set up OpenClaw with your selected runtime and security tier"
+    echo
+    echo "  ${BOLD}2. Uninstall SecureClaw${RESET}"
+    dim "Fully revert SecureClaw artifacts, user setup, and host-level hardening"
+    echo
+    menu_select \
+        "Select operation" \
+        "1" \
+        "1|Install SecureClaw" \
+        "2|Uninstall SecureClaw"
+    OPERATION_CHOICE="${MENU_SELECTION:-1}"
+    case "$OPERATION_CHOICE" in
+        1)
+            OPERATION_MODE="install"
+            info "Selected: Install"
+            ;;
+        2)
+            OPERATION_MODE="uninstall"
+            info "Selected: Uninstall"
+            ;;
+        *)
+            warn "Invalid selection, using Install (default)"
+            OPERATION_MODE="install"
             ;;
     esac
 }
@@ -239,27 +479,43 @@ generate_token() {
 # ============================================================================
 discover_openclaw_repo() {
     local repo_path=""
+    local openclaw_ref="${ARG_OPENCLAW_REF:-${OPENCLAW_REF:-$OPENCLAW_DEFAULT_REF}}"
 
     # Check OPENCLAW_REPO env var
     if [[ -n "${OPENCLAW_REPO:-}" && -d "$OPENCLAW_REPO" ]]; then
         repo_path="$OPENCLAW_REPO"
         info "Using OpenClaw repo from OPENCLAW_REPO: $repo_path" >&2
+        warn "Using local OpenClaw source; pinned ref enforcement is skipped for local repos." >&2
     # Check for --openclaw-repo argument
     elif [[ -n "${ARG_OPENCLAW_REPO:-}" && -d "$ARG_OPENCLAW_REPO" ]]; then
         repo_path="$ARG_OPENCLAW_REPO"
         info "Using OpenClaw repo from argument: $repo_path" >&2
+        warn "Using local OpenClaw source; pinned ref enforcement is skipped for local repos." >&2
     # Check sibling directory
     elif [[ -d "$(dirname "$0")/../openclaw" ]]; then
         repo_path="$(cd "$(dirname "$0")/../openclaw" && pwd)"
         info "Found OpenClaw repo in sibling directory: $repo_path" >&2
+        warn "Using local OpenClaw source; pinned ref enforcement is skipped for local repos." >&2
     # Clone it
     else
         warn "OpenClaw repository not found" >&2
-        info "Cloning from https://github.com/openclaw/openclaw.git..." >&2
-        repo_path="/tmp/openclaw-$$"
-        git clone --depth 1 https://github.com/openclaw/openclaw.git "$repo_path" >&2 || \
+        info "Cloning pinned OpenClaw ref: $openclaw_ref" >&2
+        repo_path=$(mktemp -d /tmp/openclaw-XXXXXX)
+        git clone --filter=blob:none --no-checkout "$OPENCLAW_REPO_URL" "$repo_path" >&2 || \
             die "Failed to clone OpenClaw repository"
+        git -C "$repo_path" fetch --depth 1 origin "$openclaw_ref" >&2 || \
+            die "Failed to fetch OpenClaw ref: $openclaw_ref"
+        git -C "$repo_path" checkout --detach FETCH_HEAD >&2 || \
+            die "Failed to checkout pinned OpenClaw ref"
+        local resolved_ref
+        resolved_ref=$(git -C "$repo_path" rev-parse HEAD)
+        info "Resolved OpenClaw commit: $resolved_ref" >&2
+        OPENCLAW_REF_RESOLVED="$resolved_ref"
         OPENCLAW_REPO_TEMP=1
+    fi
+
+    if [[ "$OPENCLAW_REF_RESOLVED" == "unknown" ]]; then
+        OPENCLAW_REF_RESOLVED=$(git -C "$repo_path" rev-parse HEAD 2>/dev/null || echo "local-unversioned")
     fi
 
     # Verify Dockerfile exists
@@ -302,8 +558,13 @@ prompt_security_level() {
     dim "Best for: Untrusted networks, high-security environments"
     warn "Modifies host firewall (nftables) and installs audit monitoring"
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Select tier [1/2/3] (default: 2 Hardened):${RESET} ")" -r SECURITY_LEVEL
-    SECURITY_LEVEL=${SECURITY_LEVEL:-2}
+    menu_select \
+        "Select security tier" \
+        "2" \
+        "1|Standard — basic rootless isolation" \
+        "2|Hardened — recommended" \
+        "3|Paranoid — maximum isolation"
+    SECURITY_LEVEL="${MENU_SELECTION:-2}"
 
     case "$SECURITY_LEVEL" in
         1)
@@ -341,19 +602,47 @@ prompt_install_dir() {
 prompt_username() {
     section "Section 5/9: System User"
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}System username:${RESET} ")" -r -i "openclaw" -e SYSTEM_USER
-    SYSTEM_USER=${SYSTEM_USER:-openclaw}
-    info "Will create system user: $SYSTEM_USER"
+    while true; do
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}System username:${RESET} ")" -r -i "openclaw" -e SYSTEM_USER
+        SYSTEM_USER=${SYSTEM_USER:-openclaw}
+        if is_valid_username "$SYSTEM_USER"; then
+            info "Will create system user: $SYSTEM_USER"
+            break
+        fi
+        warn "Invalid username. Use lowercase Linux username format (e.g., openclaw, claw_user)."
+    done
 }
 
 prompt_ports() {
     section "Section 6/9: Gateway Port"
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Gateway port:${RESET} ")" -r -i "18789" -e GATEWAY_PORT
-    GATEWAY_PORT=${GATEWAY_PORT:-18789}
-    BRIDGE_PORT=$((GATEWAY_PORT + 1))
-    info "Gateway port: $GATEWAY_PORT"
-    info "Bridge port: $BRIDGE_PORT"
+    while true; do
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Gateway port:${RESET} ")" -r -i "18789" -e GATEWAY_PORT
+        GATEWAY_PORT=${GATEWAY_PORT:-18789}
+        if ! is_valid_port "$GATEWAY_PORT"; then
+            warn "Gateway port must be a number between 1024 and 65534."
+            continue
+        fi
+
+        BRIDGE_PORT=$((GATEWAY_PORT + 1))
+        if ! is_valid_port "$BRIDGE_PORT"; then
+            warn "Gateway port is too high. Choose 65533 or lower."
+            continue
+        fi
+
+        if is_port_in_use "$GATEWAY_PORT"; then
+            warn "Port $GATEWAY_PORT is already in use."
+            continue
+        fi
+        if is_port_in_use "$BRIDGE_PORT"; then
+            warn "Bridge port $BRIDGE_PORT is already in use."
+            continue
+        fi
+
+        info "Gateway port: $GATEWAY_PORT"
+        info "Bridge port: $BRIDGE_PORT"
+        break
+    done
 }
 
 prompt_token() {
@@ -361,15 +650,21 @@ prompt_token() {
     info "Generating 256-bit gateway token..."
     AUTO_TOKEN=$(generate_token)
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Gateway token:${RESET} ")" -r -i "$AUTO_TOKEN" -e GATEWAY_TOKEN
-    GATEWAY_TOKEN=${GATEWAY_TOKEN:-$AUTO_TOKEN}
-    dim "Token: ${GATEWAY_TOKEN:0:16}...${GATEWAY_TOKEN: -8}"
+    while true; do
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Gateway token:${RESET} ")" -r -i "$AUTO_TOKEN" -e GATEWAY_TOKEN
+        GATEWAY_TOKEN=${GATEWAY_TOKEN:-$AUTO_TOKEN}
+        if is_valid_token "$GATEWAY_TOKEN"; then
+            dim "Token: ${GATEWAY_TOKEN:0:16}...${GATEWAY_TOKEN: -8}"
+            break
+        fi
+        warn "Gateway token must be exactly 64 hex characters (256-bit)."
+    done
 }
 
 prompt_api_keys() {
     section "Section 7/9: API Keys (optional)"
     echo
-    dim "Configure API keys for LLM providers. You need at least one key."
+    dim "Configure API keys for the LLM providers you plan to use."
     dim "Keys are stored in a protected .env file (mode 600)."
     echo
 
@@ -490,11 +785,23 @@ prompt_resource_limits() {
 
     section "Section 9/9: Resource Limits"
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Memory limit:${RESET} ")" -r -i "2g" -e MEMORY_LIMIT
-    MEMORY_LIMIT=${MEMORY_LIMIT:-2g}
+    while true; do
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Memory limit:${RESET} ")" -r -i "2g" -e MEMORY_LIMIT
+        MEMORY_LIMIT=${MEMORY_LIMIT:-2g}
+        if is_valid_memory_limit "$MEMORY_LIMIT"; then
+            break
+        fi
+        warn "Memory limit must be like 512m, 2g, 4G."
+    done
 
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}CPU limit:${RESET} ")" -r -i "2.0" -e CPU_LIMIT
-    CPU_LIMIT=${CPU_LIMIT:-2.0}
+    while true; do
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}CPU limit:${RESET} ")" -r -i "2.0" -e CPU_LIMIT
+        CPU_LIMIT=${CPU_LIMIT:-2.0}
+        if is_valid_cpu_limit "$CPU_LIMIT"; then
+            break
+        fi
+        warn "CPU limit must be a positive number (e.g., 1, 1.5, 2.0)."
+    done
 
     PID_LIMIT=256
     
@@ -557,39 +864,57 @@ layer1_system_setup() {
     # Install dependencies
     info "Installing dependencies..."
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        mark_packages_if_missing podman uidmap slirp4netns git
         apt-get update -qq
         apt-get install -y -qq podman uidmap slirp4netns git >/dev/null 2>&1 || \
             die "Failed to install dependencies"
     elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        mark_packages_if_missing ca-certificates curl gnupg git uidmap slirp4netns
         apt-get update -qq
         apt-get install -y -qq ca-certificates curl gnupg git uidmap slirp4netns >/dev/null 2>&1 || \
             die "Failed to install base dependencies"
         if ! command -v docker &>/dev/null; then
             info "Installing Docker CE..."
+            mark_packages_if_missing docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-ce-rootless-extras
             install -m 0755 -d /etc/apt/keyrings
             # shellcheck source=/dev/null
             source /etc/os-release
+            if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
+                DOCKER_APT_KEY_ADDED_BY_SECURECLAW=1
+            fi
             curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
             chmod a+r /etc/apt/keyrings/docker.asc
+            if [[ ! -f /etc/apt/sources.list.d/docker.list ]]; then
+                DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW=1
+            fi
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list
             apt-get update -qq
             apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-ce-rootless-extras >/dev/null 2>&1 || \
                 die "Failed to install Docker CE"
         else
+            mark_packages_if_missing docker-ce-rootless-extras uidmap slirp4netns
             apt-get install -y -qq docker-ce-rootless-extras uidmap slirp4netns >/dev/null 2>&1 || \
                 die "Failed to install Docker rootless extras"
         fi
     elif [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
+        mark_packages_if_missing ca-certificates curl gnupg git
         apt-get update -qq
         apt-get install -y -qq ca-certificates curl gnupg git >/dev/null 2>&1 || \
             die "Failed to install base dependencies"
         if ! command -v docker &>/dev/null; then
             info "Installing Docker CE..."
+            mark_packages_if_missing docker-ce docker-ce-cli containerd.io docker-buildx-plugin
             install -m 0755 -d /etc/apt/keyrings
             # shellcheck source=/dev/null
             source /etc/os-release
+            if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
+                DOCKER_APT_KEY_ADDED_BY_SECURECLAW=1
+            fi
             curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
             chmod a+r /etc/apt/keyrings/docker.asc
+            if [[ ! -f /etc/apt/sources.list.d/docker.list ]]; then
+                DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW=1
+            fi
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list
             apt-get update -qq
             apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin >/dev/null 2>&1 || \
@@ -602,6 +927,7 @@ layer1_system_setup() {
         info "Creating system user: $SYSTEM_USER"
         useradd --system --create-home --shell /usr/sbin/nologin "$SYSTEM_USER" || \
             die "Failed to create user"
+        USER_CREATED_BY_SECURECLAW=1
     else
         info "User $SYSTEM_USER already exists"
     fi
@@ -609,25 +935,40 @@ layer1_system_setup() {
     # Get user info
     USER_UID=$(id -u "$SYSTEM_USER")
     USER_GID=$(id -g "$SYSTEM_USER")
-    USER_HOME=$(eval echo "~$SYSTEM_USER")
+    USER_HOME=$(get_user_home "$SYSTEM_USER")
     
     # Enable linger (needed for rootless runtimes)
     if [[ "$CONTAINER_RUNTIME" != "docker" ]]; then
+        local linger_state="no"
+        linger_state=$(loginctl show-user "$SYSTEM_USER" -p Linger --value 2>/dev/null || echo "no")
         info "Enabling systemd linger for $SYSTEM_USER"
         loginctl enable-linger "$SYSTEM_USER" || \
             warn "Failed to enable linger (non-fatal)"
+        if [[ "$linger_state" != "yes" ]]; then
+            LINGER_ENABLED_BY_SECURECLAW=1
+        fi
     fi
     
     # Configure subuid/subgid (needed for rootless runtimes)
     if [[ "$CONTAINER_RUNTIME" != "docker" ]]; then
-        if ! grep -q "^$SYSTEM_USER:" /etc/subuid; then
+        touch /etc/subuid /etc/subgid
+
+        if ! awk -F: -v u="$SYSTEM_USER" '$1==u {found=1} END {exit(found ? 0 : 1)}' /etc/subuid; then
+            local subuid_start
+            subuid_start=$(next_subid_start /etc/subuid)
             info "Configuring subuid mapping"
-            echo "$SYSTEM_USER:100000:65536" >> /etc/subuid
+            echo "$SYSTEM_USER:$subuid_start:65536" >> /etc/subuid
+            SUBUID_ADDED_BY_SECURECLAW=1
+            SUBUID_RANGE="$subuid_start:65536"
         fi
         
-        if ! grep -q "^$SYSTEM_USER:" /etc/subgid; then
+        if ! awk -F: -v u="$SYSTEM_USER" '$1==u {found=1} END {exit(found ? 0 : 1)}' /etc/subgid; then
+            local subgid_start
+            subgid_start=$(next_subid_start /etc/subgid)
             info "Configuring subgid mapping"
-            echo "$SYSTEM_USER:100000:65536" >> /etc/subgid
+            echo "$SYSTEM_USER:$subgid_start:65536" >> /etc/subgid
+            SUBGID_ADDED_BY_SECURECLAW=1
+            SUBGID_RANGE="$subgid_start:65536"
         fi
     fi
     
@@ -676,22 +1017,11 @@ layer2_container_image() {
     info "Building OpenClaw image from $OPENCLAW_PATH..."
     
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
-        podman build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
-            die "Failed to build container image"
-        
-        # Save and load into user's rootless store
-        info "Transferring image to $SYSTEM_USER's rootless store..."
-        local tmp_image="/tmp/openclaw-image-$$.tar"
-        podman save -o "$tmp_image" openclaw:local || \
-            die "Failed to save image"
-        
-        # Load as user
+        # Build image in the service user's rootless store.
         sudo -u "$SYSTEM_USER" \
             XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-            podman load -i "$tmp_image" || \
-            die "Failed to load image into user store"
-        
-        rm -f "$tmp_image"
+            podman build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
+            die "Failed to build container image"
     elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
         # Build as user using rootless docker
         sudo -u "$SYSTEM_USER" \
@@ -865,7 +1195,6 @@ build_podman_args() {
     # Environment
     PODMAN_ARGS+=(-e HOME=/home/node)
     PODMAN_ARGS+=(-e TERM=xterm-256color)
-    PODMAN_ARGS+=(-e "OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN")
     PODMAN_ARGS+=(--env-file "$CONFIG_DIR/.env")  # API keys from .env file
     
     # Port publishing (localhost only for security)
@@ -915,7 +1244,6 @@ build_docker_args() {
     # Environment
     DOCKER_ARGS+=(-e HOME=/home/node)
     DOCKER_ARGS+=(-e TERM=xterm-256color)
-    DOCKER_ARGS+=(-e "OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN")
     DOCKER_ARGS+=(--env-file "$CONFIG_DIR/.env")  # API keys from .env file
     
     # Port publishing (localhost only for security)
@@ -1195,7 +1523,6 @@ UserNS=keep-id
 # Environment
 Environment=HOME=/home/node
 Environment=TERM=xterm-256color
-Environment=OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN
 EnvironmentFile=$CONFIG_DIR/.env
 
 # Ports (localhost only)
@@ -1232,7 +1559,7 @@ NoNewPrivileges=true
 # Resource limits
 Memory=$MEMORY_LIMIT
 MemorySwap=$MEMORY_LIMIT
-CPUQuota=$((${CPU_LIMIT%.*}00))%
+CPUQuota=$(cpu_quota_percent_from_limit "$CPU_LIMIT")%
 PidsLimit=$PID_LIMIT
 
 # Network
@@ -1395,7 +1722,7 @@ show_final_summary() {
     echo -e "  $CONTAINER_RUNTIME"
     echo
     echo -e "${BOLD}Gateway Token:${RESET}"
-    echo -e "  $GATEWAY_TOKEN"
+    echo -e "  ${GATEWAY_TOKEN:0:16}...${GATEWAY_TOKEN: -8}"
     echo
     echo -e "${BOLD}SSH Tunnel Command:${RESET}"
     echo -e "  ${CYAN}ssh -L $GATEWAY_PORT:127.0.0.1:$GATEWAY_PORT user@your-vps-ip${RESET}"
@@ -1495,17 +1822,37 @@ show_final_summary() {
 }
 
 # ============================================================================
+# UNINSTALL (delegates to uninstall.sh)
+# ============================================================================
+uninstall_openclaw() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local uninstall_script="$script_dir/uninstall.sh"
+
+    if [[ ! -f "$uninstall_script" ]]; then
+        die "Missing uninstall script: $uninstall_script"
+    fi
+
+    exec bash "$uninstall_script"
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 main() {
     show_banner
-    preflight_checks
     
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --openclaw-repo)
+                [[ $# -ge 2 ]] || die "--openclaw-repo requires a path"
                 ARG_OPENCLAW_REPO="$2"
+                shift 2
+                ;;
+            --openclaw-ref)
+                [[ $# -ge 2 ]] || die "--openclaw-ref requires a git ref"
+                ARG_OPENCLAW_REF="$2"
                 shift 2
                 ;;
             *)
@@ -1514,6 +1861,13 @@ main() {
                 ;;
         esac
     done
+
+    preflight_checks
+    prompt_operation_mode
+    if [[ "$OPERATION_MODE" == "uninstall" ]]; then
+        uninstall_openclaw
+        exit 0
+    fi
     
     # Interactive prompts
     prompt_system_info
@@ -1538,6 +1892,7 @@ main() {
     layer4_firewall
     layer5_monitoring
     layer7_launch
+    write_install_manifest
     
     # Show final summary
     show_final_summary

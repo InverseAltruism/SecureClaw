@@ -42,11 +42,38 @@
 
 ## 📖 What is SecureClaw?
 
-**SecureClaw** is an interactive hardened installer that deploys [OpenClaw](https://github.com/openclaw/openclaw) inside a **rootless container** with **7 layers of defense-in-depth security**.
+**SecureClaw** is an interactive hardened installer that deploys [OpenClaw](https://github.com/openclaw/openclaw) inside a **hardened container (rootless by default)** with **7 layers of defense-in-depth security**.
 
 It supports both **Podman** (rootless) and **Docker** (rootless or standard+hardened), giving you full control over your container runtime while maintaining maximum security.
 
 Designed for VPS deployments where you assume **complete hostile takeover** of the container, SecureClaw implements multiple security boundaries to minimize blast radius and protect your host system, API keys, and data.
+
+---
+
+## 🚀 Quick Start
+
+### Install (recommended defaults)
+
+```bash
+git clone https://github.com/InverseAltruism/SecureClaw.git
+cd SecureClaw
+sudo bash install.sh
+```
+
+- Choose **Podman (rootless)** for maximum isolation.
+- Choose **Hardened** security tier for production by default.
+- Use **↑/↓ + Enter** for guided runtime/tier menus, or press the number key directly.
+- Press **Enter** to accept secure defaults unless you have a reason to customize.
+- By default, SecureClaw pins OpenClaw to a reviewed commit. You can override with `--openclaw-ref <ref>`.
+
+### Full Uninstall / Revert
+
+```bash
+cd SecureClaw
+sudo bash uninstall.sh
+```
+
+The uninstaller removes SecureClaw-generated services, containers/images, install directories, paranoid-tier host artifacts, and (when it was created by SecureClaw) the dedicated system user plus namespace mappings. It can also purge runtime packages that were installed by SecureClaw.
 
 ---
 
@@ -113,7 +140,7 @@ Running OpenClaw (or any AI coding agent) without proper isolation is **dangerou
 
 | Feature | Description |
 |---------|-------------|
-| 🔒 **Rootless Containers** | Podman or Docker rootless — no root daemon, no socket exposure |
+| 🔒 **Rootless-First Runtime** | Podman/Docker rootless supported; hardened fallback for standard Docker |
 | 🐳 **Runtime Choice** | Choose Podman, Docker rootless, or Docker standard+hardened |
 | 📦 **Read-only Filesystem** | Prevents persistence of malicious modifications |
 | 🚫 **All Capabilities Dropped** | `cap-drop=ALL` — minimal privileges |
@@ -170,9 +197,9 @@ Choose your security posture during installation:
 
 | Layer | Standard | Hardened | Paranoid |
 |-------|:--------:|:--------:|:--------:|
-| Rootless container (Podman/Docker) | ✅ | ✅ | ✅ |
+| Container user isolation (rootless on supported runtimes) | ✅ | ✅ | ✅ |
 | Gateway token auth | ✅ | ✅ | ✅ |
-| Localhost-only binding | ✅ | ✅ | ✅ |
+| Host port binding to `127.0.0.1` | ✅ | ✅ | ✅ |
 | Read-only root filesystem | ❌ | ✅ | ✅ |
 | All capabilities dropped | ❌ | ✅ | ✅ |
 | No new privileges | ❌ | ✅ | ✅ |
@@ -187,23 +214,7 @@ Choose your security posture during installation:
 
 ---
 
-## 🚀 Quick Start
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/InverseAltruism/SecureClaw.git
-cd SecureClaw
-
-# Make installer executable
-chmod +x install.sh
-
-# Run the installer with sudo
-sudo bash install.sh
-```
-
-### Interactive Setup
+## 🧭 Interactive Setup Flow
 
 The installer will guide you through **9 interactive setup sections**:
 
@@ -236,7 +247,7 @@ The installer will guide you through **9 interactive setup sections**:
 
 </div>
 
-> **💡 Tip:** Default choices are optimized for security. Just press **Enter** to accept them.
+> **💡 Tip:** Default choices are optimized for security. Use **↑/↓ + Enter** in menu screens, or type the numeric choice directly.
 
 ---
 
@@ -274,9 +285,9 @@ The installer implements **7 layers of defense-in-depth security**:
 
 <br>
 
-- ✅ Discovers or clones the OpenClaw repository
+- ✅ Uses local OpenClaw source or clones a pinned upstream OpenClaw ref
 - ✅ Builds OpenClaw container image using official Dockerfile
-- ✅ Transfers image to the user's rootless store (Podman/Docker rootless)
+- ✅ Builds image directly in the service user's rootless store
 - ✅ Ensures proper XDG_RUNTIME_DIR setup
 
 </details>
@@ -391,7 +402,7 @@ ssh -L 18789:127.0.0.1:18789 user@your-vps-ip
 http://localhost:18789
 ```
 
-> 🔑 **Important:** Your gateway token was displayed during installation. Save it securely - you'll need it to authenticate!
+> 🔑 **Important:** Your gateway token is stored in `$INSTALL_DIR/.env` with mode `600`. Save it securely - you'll need it to authenticate.
 
 ---
 
