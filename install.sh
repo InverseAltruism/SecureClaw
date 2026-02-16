@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset TMOUT 2>/dev/null || true
 
 # SecureClaw Installer
 # Interactive hardened deployment for OpenClaw in rootless Podman or Docker
@@ -58,12 +59,12 @@ die() {
 show_banner() {
     echo -e "${CYAN}"
     cat << 'EOF'
-   ____                           ____ _               
-  / ___|  ___  ___ _   _ _ __ ___|  _ \ | __ ___      __
-  \___ \ / _ \/ __| | | | '__/ _ \ |_) | |/ _` \ \ /\ / /
-   ___) |  __/ (__| |_| | | |  __/  __/| | (_| |\ V  V / 
-  |____/ \___|\___|\__,_|_|  \___|_|   |_|\__,_| \_/\_/  
-                                                          
+   ____                            ____  _
+  / ___|  ___  ___ _   _ _ __ ___ / ___|| | __ ___      __
+  \___ \ / _ \/ __| | | | '__/ _ \ |    | |/ _` \ \ /\ / /
+   ___) |  __/ (__| |_| | | |  __/ |___ | | (_| |\ V  V /
+  |____/ \___|\___|\__,_|_|  \___|\_____||_|\__,_| \_/\_/
+
   Run OpenClaw in a fortress. Maximum isolation. Zero trust.
 EOF
     echo -e "${RESET}"
@@ -142,16 +143,22 @@ prompt_container_runtime() {
     echo
     echo "Choose your container runtime:"
     echo
-    echo "  ${BOLD}1. Podman (rootless)${RESET} — Default, recommended for maximum security"
-    dim "No daemon, no Docker socket, rootless by default"
+    echo "  ${BOLD}1. Podman (rootless)${RESET} — ${GREEN}Recommended${RESET} for maximum security"
+    dim "No daemon, no Docker socket to exploit, rootless by default."
+    dim "Container runs as unprivileged UID — a compromise cannot reach root."
+    dim "Requires: podman, uidmap, slirp4netns (installed automatically)"
     echo
-    echo "  ${BOLD}2. Docker (rootless)${RESET} — Good security, familiar tooling"
-    dim "No root daemon, user-namespace isolation"
+    echo "  ${BOLD}2. Docker (rootless)${RESET} — Strong security with Docker tooling"
+    dim "No root daemon, user-namespace isolation like Podman."
+    dim "Choose this if you prefer Docker CLI but want rootless security."
+    dim "Requires: docker-ce, docker-ce-rootless-extras, uidmap, slirp4netns"
     echo
-    echo "  ${BOLD}3. Docker (standard + hardened)${RESET} — Standard Docker with hardening flags"
-    dim "Root daemon present, but container hardened with all security flags"
+    echo "  ${BOLD}3. Docker (standard + hardened)${RESET} — Standard Docker with hardening"
+    dim "Uses the standard root Docker daemon, but the container itself is"
+    dim "hardened with all security flags (cap-drop, no-new-privileges, etc.)."
+    dim "Only choose this if rootless Docker/Podman is not available on your system."
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Select runtime [1/2/3]:${RESET} ")" -r RUNTIME_CHOICE
+    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Select runtime [1/2/3] (default: 1 Podman):${RESET} ")" -r RUNTIME_CHOICE
     RUNTIME_CHOICE=${RUNTIME_CHOICE:-1}
 
     case "$RUNTIME_CHOICE" in
@@ -236,21 +243,21 @@ discover_openclaw_repo() {
     # Check OPENCLAW_REPO env var
     if [[ -n "${OPENCLAW_REPO:-}" && -d "$OPENCLAW_REPO" ]]; then
         repo_path="$OPENCLAW_REPO"
-        info "Using OpenClaw repo from OPENCLAW_REPO: $repo_path"
+        info "Using OpenClaw repo from OPENCLAW_REPO: $repo_path" >&2
     # Check for --openclaw-repo argument
     elif [[ -n "${ARG_OPENCLAW_REPO:-}" && -d "$ARG_OPENCLAW_REPO" ]]; then
         repo_path="$ARG_OPENCLAW_REPO"
-        info "Using OpenClaw repo from argument: $repo_path"
+        info "Using OpenClaw repo from argument: $repo_path" >&2
     # Check sibling directory
     elif [[ -d "$(dirname "$0")/../openclaw" ]]; then
         repo_path="$(cd "$(dirname "$0")/../openclaw" && pwd)"
-        info "Found OpenClaw repo in sibling directory: $repo_path"
+        info "Found OpenClaw repo in sibling directory: $repo_path" >&2
     # Clone it
     else
-        warn "OpenClaw repository not found"
-        info "Cloning from https://github.com/openclaw/openclaw.git..."
+        warn "OpenClaw repository not found" >&2
+        info "Cloning from https://github.com/openclaw/openclaw.git..." >&2
         repo_path="/tmp/openclaw-$$"
-        git clone --depth 1 https://github.com/openclaw/openclaw.git "$repo_path" || \
+        git clone --depth 1 https://github.com/openclaw/openclaw.git "$repo_path" >&2 || \
             die "Failed to clone OpenClaw repository"
         OPENCLAW_REPO_TEMP=1
     fi
@@ -272,15 +279,30 @@ prompt_security_level() {
     echo "Choose your security tier:"
     echo
     echo "  ${BOLD}1. Standard${RESET} — Basic rootless isolation"
-    dim "Localhost binding, token auth, user namespaces"
+    dim "Rootless container, localhost binding, token auth, user namespaces"
+    dim "Best for: Local development and testing"
     echo
-    echo "  ${BOLD}2. Hardened${RESET} — Production-grade security ${GREEN}(default)${RESET}"
-    dim "Read-only root, capability drop, resource limits, network isolation"
+    echo "  ${BOLD}2. Hardened${RESET} — Production-grade security ${GREEN}(recommended)${RESET}"
+    dim "All Standard features plus:"
+    dim "  • Read-only root filesystem (prevents persistence of malicious code)"
+    dim "  • All Linux capabilities dropped (minimal kernel privileges)"
+    dim "  • no-new-privileges flag (blocks privilege escalation)"
+    dim "  • Resource limits: CPU, memory, PID caps (prevents DoS)"
+    dim "  • Network isolation via slirp4netns (no direct host access)"
+    dim "  • Workspace-only file access (restricts file operations)"
+    dim "Best for: Production VPS deployments"
     echo
     echo "  ${BOLD}3. Paranoid${RESET} — Maximum isolation"
-    dim "All hardened features + host firewall + audit logging + per-agent sandboxing"
+    dim "All Hardened features plus:"
+    dim "  • Host egress firewall via nftables (blocks cloud metadata,"
+    dim "    RFC1918 private networks, and lateral movement)"
+    dim "  • Audit logging via auditd (monitors all process execution)"
+    dim "  • Cron-based network anomaly detection (alerts on suspicious connections)"
+    dim "  • Per-agent sandboxing (double containerization)"
+    dim "Best for: Untrusted networks, high-security environments"
+    warn "Modifies host firewall (nftables) and installs audit monitoring"
     echo
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Select tier [1/2/3]:${RESET} ")" -r SECURITY_LEVEL
+    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Select tier [1/2/3] (default: 2 Hardened):${RESET} ")" -r SECURITY_LEVEL
     SECURITY_LEVEL=${SECURITY_LEVEL:-2}
 
     case "$SECURITY_LEVEL" in
@@ -347,32 +369,84 @@ prompt_token() {
 prompt_api_keys() {
     section "Section 7/9: API Keys (optional)"
     echo
-    dim "Press Enter to skip any key"
+    dim "Configure API keys for LLM providers. You need at least one key."
+    dim "Keys are stored in a protected .env file (mode 600)."
     echo
 
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}ANTHROPIC_API_KEY:${RESET} ")" -rs ANTHROPIC_API_KEY || true
-    echo
-    if [[ -n "$ANTHROPIC_API_KEY" ]]; then
-        dim "Anthropic key configured"
-    fi
+    # Initialize all keys as empty
+    ANTHROPIC_API_KEY=""
+    OPENAI_API_KEY=""
+    OPENROUTER_API_KEY=""
+    GEMINI_API_KEY=""
 
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}OPENAI_API_KEY:${RESET} ")" -rs OPENAI_API_KEY || true
-    echo
-    if [[ -n "$OPENAI_API_KEY" ]]; then
-        dim "OpenAI key configured"
-    fi
+    while true; do
+        echo
+        echo "  Which API keys would you like to configure?"
+        echo
+        local anthro_status="not set"
+        local openai_status="not set"
+        local openrouter_status="not set"
+        local gemini_status="not set"
+        [[ -n "$ANTHROPIC_API_KEY" ]] && anthro_status="${GREEN}configured${RESET}"
+        [[ -n "$OPENAI_API_KEY" ]] && openai_status="${GREEN}configured${RESET}"
+        [[ -n "$OPENROUTER_API_KEY" ]] && openrouter_status="${GREEN}configured${RESET}"
+        [[ -n "$GEMINI_API_KEY" ]] && gemini_status="${GREEN}configured${RESET}"
 
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}OPENROUTER_API_KEY:${RESET} ")" -rs OPENROUTER_API_KEY || true
-    echo
-    if [[ -n "$OPENROUTER_API_KEY" ]]; then
-        dim "OpenRouter key configured"
-    fi
+        echo -e "  ${BOLD}1.${RESET} Anthropic (Claude)     [$anthro_status]"
+        echo -e "  ${BOLD}2.${RESET} OpenAI (GPT)           [$openai_status]"
+        echo -e "  ${BOLD}3.${RESET} OpenRouter             [$openrouter_status]"
+        echo -e "  ${BOLD}4.${RESET} Google Gemini          [$gemini_status]"
+        echo -e "  ${BOLD}d.${RESET} Done — continue to next step"
+        echo
 
-    read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}GEMINI_API_KEY:${RESET} ")" -rs GEMINI_API_KEY || true
-    echo
-    if [[ -n "$GEMINI_API_KEY" ]]; then
-        dim "Gemini key configured"
-    fi
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Select a key to configure [1/2/3/4/d]:${RESET} ")" -r key_choice
+        key_choice=${key_choice:-d}
+
+        case "$key_choice" in
+            1)
+                read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}ANTHROPIC_API_KEY:${RESET} ")" -rs ANTHROPIC_API_KEY || true
+                echo
+                if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+                    info "Anthropic key configured"
+                else
+                    dim "Anthropic key cleared"
+                fi
+                ;;
+            2)
+                read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}OPENAI_API_KEY:${RESET} ")" -rs OPENAI_API_KEY || true
+                echo
+                if [[ -n "$OPENAI_API_KEY" ]]; then
+                    info "OpenAI key configured"
+                else
+                    dim "OpenAI key cleared"
+                fi
+                ;;
+            3)
+                read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}OPENROUTER_API_KEY:${RESET} ")" -rs OPENROUTER_API_KEY || true
+                echo
+                if [[ -n "$OPENROUTER_API_KEY" ]]; then
+                    info "OpenRouter key configured"
+                else
+                    dim "OpenRouter key cleared"
+                fi
+                ;;
+            4)
+                read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}GEMINI_API_KEY:${RESET} ")" -rs GEMINI_API_KEY || true
+                echo
+                if [[ -n "$GEMINI_API_KEY" ]]; then
+                    info "Gemini key configured"
+                else
+                    dim "Gemini key cleared"
+                fi
+                ;;
+            [dD])
+                break
+                ;;
+            *)
+                warn "Invalid selection. Enter 1-4 to configure a key, or d to continue."
+                ;;
+        esac
+    done
 
     local key_count=0
     [[ -n "${ANTHROPIC_API_KEY:-}" ]] && ((key_count++))
@@ -572,6 +646,19 @@ layer1_system_setup() {
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
             dockerd-rootless-setuptool.sh install || \
             die "Failed to set up Docker rootless"
+
+        # Wait for Docker rootless socket to become available
+        local docker_sock="$XDG_RUNTIME_DIR/docker.sock"
+        info "Waiting for Docker rootless socket at $docker_sock..."
+        local retries=0
+        while [[ ! -S "$docker_sock" && $retries -lt 30 ]]; do
+            sleep 1
+            ((retries++))
+        done
+        if [[ ! -S "$docker_sock" ]]; then
+            die "Docker rootless socket not found at $docker_sock after 30s. Is the daemon running?"
+        fi
+        info "Docker rootless socket is ready"
     fi
     
     info "Layer 1 complete"
