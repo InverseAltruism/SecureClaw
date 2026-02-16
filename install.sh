@@ -57,6 +57,7 @@ readonly SECURECLAW_STATE_DIR="/etc/secureclaw"
 readonly SECURECLAW_INSTALL_STATE_FILE="$SECURECLAW_STATE_DIR/install.env"
 readonly OPENCLAW_REPO_URL="https://github.com/openclaw/openclaw.git"
 readonly OPENCLAW_DEFAULT_REF="c593709d252a1efe70a8ce40d40627a35b818e46"
+readonly SECURECLAW_UNINSTALL_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/uninstall.sh"
 
 get_user_home() {
     local user_name="$1"
@@ -94,6 +95,7 @@ SYSTEM_USER=$SYSTEM_USER
 INSTALL_DIR=$INSTALL_DIR
 CONTAINER_RUNTIME=$CONTAINER_RUNTIME
 SECURITY_TIER=$SECURITY_TIER
+INSTALL_PROFILE=$INSTALL_PROFILE
 ENABLE_SYSTEMD=$ENABLE_SYSTEMD
 GATEWAY_PORT=$GATEWAY_PORT
 BRIDGE_PORT=$BRIDGE_PORT
@@ -133,6 +135,20 @@ mark_packages_if_missing() {
     done
 }
 
+download_url_to_file() {
+    local url="$1"
+    local output_path="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$output_path"
+        return
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -qO "$output_path" "$url"
+        return
+    fi
+    return 1
+}
+
 # Install metadata flags for full uninstall/revert.
 USER_CREATED_BY_SECURECLAW=0
 LINGER_ENABLED_BY_SECURECLAW=0
@@ -144,6 +160,8 @@ PACKAGES_INSTALLED_BY_SECURECLAW=""
 DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW=0
 DOCKER_APT_KEY_ADDED_BY_SECURECLAW=0
 OPENCLAW_REF_RESOLVED="unknown"
+INSTALL_PROFILE="quick"
+ARG_INSTALL_PROFILE=""
 
 MENU_SELECTION=""
 
@@ -419,6 +437,86 @@ prompt_operation_mode() {
             OPERATION_MODE="install"
             ;;
     esac
+}
+
+prompt_install_profile() {
+    section "Installation Mode"
+    echo
+    echo "  ${BOLD}1. Quick Secure Install${RESET} — ${GREEN}Recommended${RESET}"
+    dim "Best for non-technical users. Uses secure defaults and minimal prompts."
+    dim "Defaults: Podman rootless, Hardened tier, systemd enabled."
+    echo
+    echo "  ${BOLD}2. Advanced Guided Install${RESET}"
+    dim "Full control over runtime, security tier, paths, ports, and limits."
+    echo
+
+    menu_select \
+        "Select installation mode" \
+        "${ARG_INSTALL_PROFILE:-1}" \
+        "1|Quick Secure Install" \
+        "2|Advanced Guided Install"
+
+    case "${MENU_SELECTION:-1}" in
+        1)
+            INSTALL_PROFILE="quick"
+            info "Selected: Quick Secure Install"
+            ;;
+        2)
+            INSTALL_PROFILE="advanced"
+            info "Selected: Advanced Guided Install"
+            ;;
+        *)
+            INSTALL_PROFILE="quick"
+            info "Selected: Quick Secure Install (default)"
+            ;;
+    esac
+}
+
+apply_quick_secure_defaults() {
+    section "Applying Quick Secure Defaults"
+
+    CONTAINER_RUNTIME="podman"
+    SECURITY_TIER="hardened"
+    INSTALL_DIR="/home/openclaw/.openclaw"
+    SYSTEM_USER="openclaw"
+    ENABLE_SYSTEMD=1
+    MEMORY_LIMIT="2g"
+    CPU_LIMIT="2.0"
+    PID_LIMIT=256
+
+    GATEWAY_PORT=18789
+    BRIDGE_PORT=$((GATEWAY_PORT + 1))
+    while is_port_in_use "$GATEWAY_PORT" || is_port_in_use "$BRIDGE_PORT"; do
+        ((GATEWAY_PORT+=2))
+        BRIDGE_PORT=$((GATEWAY_PORT + 1))
+        if (( BRIDGE_PORT > 65534 )); then
+            die "No free gateway/bridge port pair found in range 18789-65534. Use Advanced mode."
+        fi
+    done
+
+    GATEWAY_TOKEN=$(generate_token)
+    ANTHROPIC_API_KEY=""
+    OPENAI_API_KEY=""
+    OPENROUTER_API_KEY=""
+    GEMINI_API_KEY=""
+
+    info "Runtime: $CONTAINER_RUNTIME"
+    info "Tier: $SECURITY_TIER"
+    info "Install dir: $INSTALL_DIR"
+    info "System user: $SYSTEM_USER"
+    info "Gateway port: $GATEWAY_PORT (bridge: $BRIDGE_PORT)"
+    info "Systemd: enabled"
+
+    if [[ -t 0 ]]; then
+        read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Configure API keys now? [y/N]:${RESET} ")" -r QUICK_KEYS
+        if [[ "$QUICK_KEYS" =~ ^[Yy]$ ]]; then
+            prompt_api_keys
+        else
+            info "Skipping API key setup for now (you can add them later in $INSTALL_DIR/.env)."
+        fi
+    else
+        info "Non-interactive mode detected; skipping API key prompts."
+    fi
 }
 
 # ============================================================================
@@ -813,6 +911,7 @@ prompt_resource_limits() {
 show_summary() {
     section "Configuration Summary"
     echo
+    echo -e "${BOLD}Install Mode:${RESET}        $INSTALL_PROFILE"
     echo -e "${BOLD}Container Runtime:${RESET}   $CONTAINER_RUNTIME"
     echo -e "${BOLD}Security Tier:${RESET}       $SECURITY_TIER"
     echo -e "${BOLD}Install Directory:${RESET}   $INSTALL_DIR"
@@ -1706,6 +1805,35 @@ EOF
 }
 
 # ============================================================================
+# LAYER 8: UNINSTALL ENTRYPOINT
+# ============================================================================
+layer8_install_uninstall_entrypoint() {
+    section "Layer 8: Uninstall Entrypoint"
+
+    local target="/usr/local/bin/secureclaw-uninstall"
+    local local_uninstall
+    local_uninstall="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/uninstall.sh"
+
+    if [[ -f "$local_uninstall" ]]; then
+        install -m 0755 "$local_uninstall" "$target"
+        info "Installed uninstall command: $target"
+        return
+    fi
+
+    local tmp_uninstall
+    tmp_uninstall=$(mktemp /tmp/secureclaw-uninstall-XXXXXX.sh)
+    if download_url_to_file "$SECURECLAW_UNINSTALL_URL" "$tmp_uninstall"; then
+        install -m 0755 "$tmp_uninstall" "$target"
+        rm -f "$tmp_uninstall"
+        info "Downloaded and installed uninstall command: $target"
+    else
+        rm -f "$tmp_uninstall" || true
+        warn "Could not install $target (no local uninstall.sh and download failed)."
+        warn "You can still uninstall by running uninstall.sh from this repo later."
+    fi
+}
+
+# ============================================================================
 # FINAL SUMMARY
 # ============================================================================
 show_final_summary() {
@@ -1768,6 +1896,10 @@ show_final_summary() {
         fi
     fi
     echo
+    echo -e "${BOLD}Uninstall:${RESET}"
+    echo -e "  sudo secureclaw-uninstall"
+    echo -e "  # or: sudo bash uninstall.sh (from this repository)"
+    echo
     echo -e "${BOLD}Configuration:${RESET}"
     echo -e "  Config: $CONFIG_DIR/openclaw.json"
     echo -e "  API Keys: $CONFIG_DIR/.env"
@@ -1829,11 +1961,23 @@ uninstall_openclaw() {
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local uninstall_script="$script_dir/uninstall.sh"
 
-    if [[ ! -f "$uninstall_script" ]]; then
-        die "Missing uninstall script: $uninstall_script"
+    if [[ -f "$uninstall_script" ]]; then
+        exec bash "$uninstall_script"
     fi
 
-    exec bash "$uninstall_script"
+    if [[ -x /usr/local/bin/secureclaw-uninstall ]]; then
+        exec /usr/local/bin/secureclaw-uninstall
+    fi
+
+    local temp_uninstall
+    temp_uninstall=$(mktemp /tmp/secureclaw-uninstall-XXXXXX.sh)
+    if download_url_to_file "$SECURECLAW_UNINSTALL_URL" "$temp_uninstall"; then
+        chmod 700 "$temp_uninstall"
+        exec bash "$temp_uninstall"
+    fi
+
+    rm -f "$temp_uninstall" || true
+    die "Uninstall script not found locally and failed to download fallback uninstaller."
 }
 
 # ============================================================================
@@ -1855,6 +1999,14 @@ main() {
                 ARG_OPENCLAW_REF="$2"
                 shift 2
                 ;;
+            --quick)
+                ARG_INSTALL_PROFILE="1"
+                shift
+                ;;
+            --advanced)
+                ARG_INSTALL_PROFILE="2"
+                shift
+                ;;
             *)
                 warn "Unknown argument: $1"
                 shift
@@ -1868,18 +2020,24 @@ main() {
         uninstall_openclaw
         exit 0
     fi
-    
+
+    prompt_install_profile
+
     # Interactive prompts
     prompt_system_info
-    prompt_container_runtime
-    prompt_security_level
-    prompt_install_dir
-    prompt_username
-    prompt_ports
-    prompt_token
-    prompt_api_keys
-    prompt_systemd
-    prompt_resource_limits
+    if [[ "$INSTALL_PROFILE" == "quick" ]]; then
+        apply_quick_secure_defaults
+    else
+        prompt_container_runtime
+        prompt_security_level
+        prompt_install_dir
+        prompt_username
+        prompt_ports
+        prompt_token
+        prompt_api_keys
+        prompt_systemd
+        prompt_resource_limits
+    fi
     
     # Review and confirm
     show_summary
@@ -1892,6 +2050,7 @@ main() {
     layer4_firewall
     layer5_monitoring
     layer7_launch
+    layer8_install_uninstall_entrypoint
     write_install_manifest
     
     # Show final summary

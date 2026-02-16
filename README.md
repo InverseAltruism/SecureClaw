@@ -52,26 +52,33 @@ Designed for VPS deployments where you assume **complete hostile takeover** of t
 
 ## 🚀 Quick Start
 
-### Install (recommended defaults)
+### Install in One Command (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/install.sh | sudo bash
+```
+
+- The installer can fetch OpenClaw automatically (users do not need to clone OpenClaw).
+- Default flow is **Quick Secure Install** for non-technical users.
+- Use **↑/↓ + Enter** for guided menus, or press the number key directly.
+- Press **Enter** to accept recommended secure defaults.
+- By default, SecureClaw pins OpenClaw to a reviewed commit. You can override with `--openclaw-ref <ref>`.
+
+### Advanced Install (optional)
 
 ```bash
 git clone https://github.com/InverseAltruism/SecureClaw.git
 cd SecureClaw
-sudo bash install.sh
+sudo bash install.sh --advanced
 ```
-
-- Choose **Podman (rootless)** for maximum isolation.
-- Choose **Hardened** security tier for production by default.
-- Use **↑/↓ + Enter** for guided runtime/tier menus, or press the number key directly.
-- Press **Enter** to accept secure defaults unless you have a reason to customize.
-- By default, SecureClaw pins OpenClaw to a reviewed commit. You can override with `--openclaw-ref <ref>`.
 
 ### Full Uninstall / Revert
 
 ```bash
-cd SecureClaw
-sudo bash uninstall.sh
+sudo secureclaw-uninstall
 ```
+
+If `/usr/local/bin/secureclaw-uninstall` is unavailable, run `sudo bash uninstall.sh` from this repo.
 
 The uninstaller removes SecureClaw-generated services, containers/images, install directories, paranoid-tier host artifacts, and (when it was created by SecureClaw) the dedicated system user plus namespace mappings. It can also purge runtime packages that were installed by SecureClaw.
 
