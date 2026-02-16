@@ -55,10 +55,12 @@ die() {
 
 readonly SECURECLAW_STATE_DIR="/etc/secureclaw"
 readonly SECURECLAW_INSTALL_STATE_FILE="$SECURECLAW_STATE_DIR/install.env"
+readonly SECURECLAW_PUBLIC_STATE_FILE="/etc/secureclaw-public.env"
 readonly OPENCLAW_REPO_URL="https://github.com/openclaw/openclaw.git"
 readonly OPENCLAW_DEFAULT_REF="c593709d252a1efe70a8ce40d40627a35b818e46"
 readonly SECURECLAW_UNINSTALL_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/uninstall.sh"
 readonly SECURECLAW_PANIC_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/panic.sh"
+readonly SECURECLAW_CONNECT_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-from-pc.sh"
 
 get_user_home() {
     local user_name="$1"
@@ -112,6 +114,15 @@ DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW=$DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW
 DOCKER_APT_KEY_ADDED_BY_SECURECLAW=$DOCKER_APT_KEY_ADDED_BY_SECURECLAW
 EOF
     chmod 600 "$SECURECLAW_INSTALL_STATE_FILE"
+
+    cat > "$SECURECLAW_PUBLIC_STATE_FILE" << EOF
+GATEWAY_PORT=$GATEWAY_PORT
+BRIDGE_PORT=$BRIDGE_PORT
+CONTAINER_RUNTIME=$CONTAINER_RUNTIME
+SECURITY_TIER=$SECURITY_TIER
+INSTALL_PROFILE=$INSTALL_PROFILE
+EOF
+    chmod 644 "$SECURECLAW_PUBLIC_STATE_FILE"
 }
 
 cpu_quota_percent_from_limit() {
@@ -1940,6 +1951,10 @@ show_final_summary() {
     echo
     echo -e "${BOLD}SSH Tunnel Command:${RESET}"
     echo -e "  ${CYAN}ssh -L $GATEWAY_PORT:127.0.0.1:$GATEWAY_PORT user@your-vps-ip${RESET}"
+    echo
+    echo -e "${BOLD}PC Access Helper Script:${RESET}"
+    echo -e "  curl -fsSL $SECURECLAW_CONNECT_URL -o connect-from-pc.sh"
+    echo -e "  bash connect-from-pc.sh --host your-vps-ip --user your-vps-user"
     echo
     echo -e "${BOLD}View Logs:${RESET}"
     if [[ $ENABLE_SYSTEMD -eq 1 ]]; then

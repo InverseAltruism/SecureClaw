@@ -414,9 +414,21 @@ SecureClaw defends against common attack vectors:
 
 ## 📡 Post-Install
 
+### ✅ First-Run Checklist
+
+After installation, do these steps in order:
+
+1. Confirm the gateway port shown at the end of installation (default `18789`, but it may auto-change if busy).
+2. Create an SSH tunnel from your PC to the VPS.
+3. Open the dashboard in your local browser (`http://localhost:<port>`).
+4. Authenticate with your gateway token from `~/.openclaw/.env` on the VPS.
+5. If you skipped API keys during install, add them to `.env` and restart OpenClaw.
+
+---
+
 ### 🌐 Access the Dashboard
 
-SecureClaw binds to `127.0.0.1` only for security. Access it via SSH tunnel:
+SecureClaw binds to `127.0.0.1` only for security. For most VPS setups, this is the recommended way to access OpenClaw from your PC:
 
 ```bash
 # From your local machine, create an SSH tunnel
@@ -426,7 +438,30 @@ ssh -L 18789:127.0.0.1:18789 user@your-vps-ip
 http://localhost:18789
 ```
 
+> Replace `18789` if your install summary showed a different gateway port.
+
 > 🔑 **Important:** Your gateway token is stored in `$INSTALL_DIR/.env` with mode `600`. Save it securely - you'll need it to authenticate.
+
+### 🧭 Optional PC Helper Script (recommended for non-technical users)
+
+Run this on your **PC** (not on the VPS) to create the SSH tunnel automatically:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-from-pc.sh -o connect-from-pc.sh
+bash connect-from-pc.sh --host your-vps-ip --user your-vps-user
+```
+
+The helper script will:
+- Try to auto-detect the gateway port from `/etc/secureclaw-public.env` on your VPS
+- Fall back to port `18789` if detection is unavailable
+- Start the secure SSH tunnel and print the local dashboard URL
+
+If you need to check current config paths later:
+
+```bash
+sudo ls -la /etc/secureclaw/install.env
+sudo sed -n '1,20p' /etc/secureclaw/install.env
+```
 
 ---
 

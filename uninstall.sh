@@ -14,6 +14,7 @@ readonly RESET='\033[0m'
 
 readonly SECURECLAW_STATE_DIR="/etc/secureclaw"
 readonly SECURECLAW_INSTALL_STATE_FILE="$SECURECLAW_STATE_DIR/install.env"
+readonly SECURECLAW_PUBLIC_STATE_FILE="/etc/secureclaw-public.env"
 
 info() {
     echo -e "${CYAN}▸${RESET} $*"
@@ -328,6 +329,7 @@ cleanup_install_state() {
     section "Uninstall: install state"
 
     rm -f "$SECURECLAW_INSTALL_STATE_FILE"
+    rm -f "$SECURECLAW_PUBLIC_STATE_FILE"
     rmdir "$SECURECLAW_STATE_DIR" >/dev/null 2>&1 || true
 }
 
