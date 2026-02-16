@@ -4,10 +4,29 @@
 
 ### *Run OpenClaw in a fortress. Maximum isolation. Zero trust.*
 
+<br>
+
+```
+   ____                           ____ _               
+  / ___|  ___  ___ _   _ _ __ ___|  _ \ | __ ___      __
+  \___ \ / _ \/ __| | | | '__/ _ \ |_) | |/ _` \ \ /\ / /
+   ___) |  __/ (__| |_| | | |  __/  __/| | (_| |\ V  V / 
+  |____/ \___|\___|\__,_|_|  \___|_|   |_|\__,_| \_/\_/  
+```
+
+<br>
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](install.sh)
-[![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](#requirements)
+[![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](#-requirements)
+[![Runtime](https://img.shields.io/badge/Runtime-Podman%20%7C%20Docker-blue.svg)](#-container-runtime-options)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
+**Developed by [Granus Labs](https://granuslabs.com)**
+
+---
+
+[Features](#-features) · [Quick Start](#-quick-start) · [Security Tiers](#-security-tiers) · [Why Secure?](#%EF%B8%8F-why-you-need-secureclaw) · [Post-Install](#-post-install) · [Contributing](#-contributing)
 
 </div>
 
@@ -15,26 +34,125 @@
 
 ## What is SecureClaw?
 
-**SecureClaw** is an interactive hardened installer that deploys [OpenClaw](https://github.com/openclaw/openclaw) inside a **rootless Podman container** with **7 layers of defense-in-depth security**. 
+**SecureClaw** is an interactive hardened installer that deploys [OpenClaw](https://github.com/openclaw/openclaw) inside a **rootless container** with **7 layers of defense-in-depth security**.
+
+It supports both **Podman** (rootless) and **Docker** (rootless or standard+hardened), giving you full control over your container runtime while maintaining maximum security.
 
 Designed for VPS deployments where you assume **complete hostile takeover** of the container, SecureClaw implements multiple security boundaries to minimize blast radius and protect your host system, API keys, and data.
 
-Unlike traditional Docker deployments, SecureClaw provides a **zero-trust architecture** with graduated security tiers, egress filtering, audit logging, and complete isolation from the Docker daemon.
+---
+
+## ⚠️ Why You Need SecureClaw
+
+Running OpenClaw (or any AI coding agent) without proper isolation is **dangerous**. Here's what can go wrong:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    ❌  INSECURE DEPLOYMENT                          │
+│                                                                     │
+│   ┌───────────┐     Full Access      ┌──────────────────────┐      │
+│   │  OpenClaw │ ──────────────────── │  Your Host System    │      │
+│   │  (AI Agent)│                      │  • Root filesystem   │      │
+│   │           │     No Limits         │  • All network       │      │
+│   │           │ ──────────────────── │  • SSH keys          │      │
+│   │           │                      │  • All API keys      │      │
+│   │           │     Unrestricted     │  • Other services    │      │
+│   │           │ ──────────────────── │  • Cloud metadata    │      │
+│   └───────────┘                      └──────────────────────┘      │
+│                                                                     │
+│   🔓 Container escape = full host compromise                        │
+│   🔓 Malicious code runs with your privileges                       │
+│   🔓 API keys exposed in environment variables                      │
+│   🔓 Network access to cloud metadata (169.254.x.x)                │
+│   🔓 Lateral movement to other services on your network             │
+│   🔓 No resource limits = denial of service                         │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    ✅  SECURECLAW DEPLOYMENT                        │
+│                                                                     │
+│   ┌───────────┐                      ┌──────────────────────┐      │
+│   │  OpenClaw │ ─── 7 Security ───── │  Protected Host      │      │
+│   │  (Isolated)│     Layers           │                      │      │
+│   │           │                      │  ✅ Read-only root   │      │
+│   │  Rootless │ ─── Egress ───────── │  ✅ Egress firewall  │      │
+│   │  Container│     Firewall         │  ✅ Audit logging    │      │
+│   │           │                      │  ✅ No capabilities  │      │
+│   │  No caps  │ ─── Resource ─────── │  ✅ Resource limits  │      │
+│   │  No privs │     Limits           │  ✅ User namespace   │      │
+│   └───────────┘                      └──────────────────────┘      │
+│                                                                     │
+│   🔒 Container runs as unprivileged user (no root daemon*)          │
+│   🔒 Read-only filesystem prevents persistence                      │
+│   🔒 Egress firewall blocks cloud metadata & lateral movement       │
+│   🔒 All capabilities dropped + no-new-privileges                   │
+│   🔒 Resource limits prevent denial of service                      │
+│   🔒 Audit monitoring catches suspicious behavior                   │
+│                                                                     │
+│   * Podman and Docker rootless mode — no root daemon at all         │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+> **Bottom line:** Without SecureClaw, a single prompt injection or malicious code execution
+> gives an attacker full access to your system, API keys, and network. With SecureClaw,
+> even a complete container compromise is contained within multiple security boundaries.
 
 ---
 
 ## ✨ Features
 
-- 🔒 **Rootless Podman** — No root daemon, no Docker socket exposure
-- 📦 **Read-only container filesystem** — Prevents persistence of malicious modifications
-- 🚫 **All Linux capabilities dropped** (`cap-drop=ALL`) — Minimal privileges
-- 🛡️ **Privilege escalation blocked** (`no-new-privileges`) — Cannot gain elevated access
-- 🌐 **Egress firewall (nftables)** — Only LLM API traffic allowed, blocks cloud metadata & RFC1918
-- 📊 **Audit monitoring** (auditd + cron network anomaly detection) — Real-time threat detection
-- 🏗️ **OpenClaw internal sandbox** — Double containerization with per-agent isolation
-- ⚡ **Interactive setup** with 3 security tiers: **Standard → Hardened → Paranoid**
-- 🔑 **Auto-generated 256-bit gateway tokens** — Cryptographically secure authentication
-- 🔄 **Optional systemd Quadlet** — Auto-start on boot with proper lifecycle management
+| Feature | Description |
+|---------|-------------|
+| 🔒 **Rootless Containers** | Podman or Docker rootless — no root daemon, no socket exposure |
+| 🐳 **Runtime Choice** | Choose Podman, Docker rootless, or Docker standard+hardened |
+| 📦 **Read-only Filesystem** | Prevents persistence of malicious modifications |
+| 🚫 **All Capabilities Dropped** | `cap-drop=ALL` — minimal privileges |
+| 🛡️ **No New Privileges** | `no-new-privileges` — cannot escalate access |
+| 🌐 **Egress Firewall** | nftables rules block cloud metadata & RFC1918 |
+| 📊 **Audit Monitoring** | auditd + cron network anomaly detection |
+| 🏗️ **Agent Sandboxing** | Per-agent isolation with double containerization |
+| ⚡ **3 Security Tiers** | Standard → Hardened → Paranoid |
+| 🔑 **Auto-generated Tokens** | Cryptographically secure 256-bit gateway tokens |
+| 🔄 **Systemd Integration** | Quadlet (Podman) or systemd service (Docker) auto-start |
+| 🖥️ **System Detection** | Auto-detects OS, architecture, RAM, CPU cores |
+
+---
+
+## 🐳 Container Runtime Options
+
+SecureClaw lets you choose your preferred container runtime during installation:
+
+| Runtime | Security Level | Root Daemon? | Best For |
+|---------|---------------|-------------|----------|
+| **Podman (rootless)** | 🟢 Highest | No | Maximum security, VPS deployments |
+| **Docker (rootless)** | 🟢 High | No | Docker familiarity + strong security |
+| **Docker (standard+hardened)** | 🟡 Good | Yes | Compatibility, existing Docker setups |
+
+### Why Rootless Matters
+
+```
+  Root Daemon (Traditional Docker)         Rootless (Podman / Docker Rootless)
+  ─────────────────────────────────       ──────────────────────────────────────
+  
+  ┌─────────┐                             ┌─────────┐
+  │ docker  │  Talks to root daemon       │ podman/ │  No daemon at all
+  │   CLI   │ ──────────┐                 │ docker  │ ─── Direct process
+  └─────────┘            │                 └─────────┘
+                         ▼                  
+              ┌──────────────────┐             User Namespace
+              │  dockerd (ROOT)  │         ┌──────────────────┐
+              │                  │         │  Container runs   │
+              │  Full host       │         │  as UID 100000+   │
+              │  access possible │         │  No host access   │
+              └──────────────────┘         └──────────────────┘
+  
+  ⚠ Exploit in daemon = root on host     ✅ Exploit = unprivileged user
+  ⚠ Docker socket = root shell           ✅ No socket to exploit
+```
+
+> **Recommendation:** Use **Podman (rootless)** for maximum security. Use **Docker (rootless)** if you prefer Docker's tooling. Only use Docker standard if rootless isn't an option on your system.
 
 ---
 
@@ -43,8 +161,8 @@ Unlike traditional Docker deployments, SecureClaw provides a **zero-trust archit
 Choose your security posture during installation:
 
 | Layer | Standard | Hardened | Paranoid |
-|-------|----------|----------|----------|
-| Rootless Podman | ✅ | ✅ | ✅ |
+|-------|:--------:|:--------:|:--------:|
+| Rootless container (Podman/Docker) | ✅ | ✅ | ✅ |
 | Gateway token auth | ✅ | ✅ | ✅ |
 | Localhost-only binding | ✅ | ✅ | ✅ |
 | Read-only root filesystem | ❌ | ✅ | ✅ |
@@ -52,12 +170,12 @@ Choose your security posture during installation:
 | No new privileges | ❌ | ✅ | ✅ |
 | Resource limits (CPU/RAM/PIDs) | ❌ | ✅ | ✅ |
 | Workspace-only file access | ❌ | ✅ | ✅ |
-| Network isolation (slirp4netns) | ❌ | ✅ | ✅ |
+| Network isolation | ❌ | ✅ | ✅ |
 | **Host egress firewall (nftables)** | ❌ | ❌ | ✅ |
 | **Audit logging (auditd + cron)** | ❌ | ❌ | ✅ |
 | **Agent-level sandboxing** | ❌ | ❌ | ✅ |
 
-**Recommendation:** Start with **Hardened** (default) for production deployments. Use **Paranoid** for maximum security on untrusted networks.
+> 💡 **Recommendation:** Start with **Hardened** (default) for production deployments. Use **Paranoid** for maximum security on untrusted networks.
 
 ---
 
@@ -70,16 +188,35 @@ chmod +x install.sh
 sudo bash install.sh
 ```
 
-The installer will guide you through 7 interactive setup sections. Default choices are optimized for security.
+The installer will guide you through **9 interactive setup sections**:
+
+```
+  ┌─────────────────────────────────────────────┐
+  │  Section 1/9  System Information            │  Auto-detected OS, RAM, CPUs
+  │  Section 2/9  Container Runtime             │  Podman / Docker rootless / Docker
+  │  Section 3/9  Security Level                │  Standard / Hardened / Paranoid
+  │  Section 4/9  Installation Directory        │  Where to install OpenClaw
+  │  Section 5/9  System User                   │  Dedicated service user
+  │  Section 6/9  Gateway Port & Token          │  Network port + auth token
+  │  Section 7/9  API Keys                      │  LLM provider keys (optional)
+  │  Section 8/9  Systemd Auto-Start            │  Boot persistence
+  │  Section 9/9  Resource Limits               │  CPU/RAM/PID constraints
+  └─────────────────────────────────────────────┘
+```
+
+Default choices are optimized for security. Just press Enter to accept them.
 
 ---
 
 ## 📋 Requirements
 
-- **OS:** Debian 12+ or Ubuntu 22.04+
-- **Privileges:** Root or sudo access (only during installation)
-- **Hardware:** VPS with 2GB+ RAM, 2+ CPU cores recommended
-- **Network:** Internet access for package installation and LLM API calls
+| Requirement | Details |
+|------------|---------|
+| **OS** | Debian 12+ or Ubuntu 22.04+ |
+| **Privileges** | Root or sudo access (only during installation) |
+| **Hardware** | VPS with 2GB+ RAM, 2+ CPU cores recommended |
+| **Network** | Internet access for package installation and LLM API calls |
+| **Runtime** | Podman or Docker (installed automatically if not present) |
 
 ---
 
@@ -87,51 +224,47 @@ The installer will guide you through 7 interactive setup sections. Default choic
 
 The installer implements **7 layers of security**:
 
-### **Layer 1: System User & Dependencies**
-- Installs Podman, uidmap, slirp4netns (rootless requirements)
+### Layer 1: System User & Dependencies
+- Installs your chosen runtime (Podman or Docker) and required tools
+- For Docker rootless: sets up `dockerd-rootless-setuptool.sh`
 - Creates dedicated `openclaw` system user (no shell, no sudo)
 - Configures subuid/subgid mappings for user namespace isolation
 - Enables systemd linger for rootless container persistence
 
-### **Layer 2: Container Image**
+### Layer 2: Container Image
 - Discovers or clones the OpenClaw repository
 - Builds OpenClaw container image using official Dockerfile
-- Transfers image to the openclaw user's rootless Podman storage
-- Ensures proper XDG_RUNTIME_DIR setup for rootless operation
+- Transfers image to the user's rootless store (Podman/Docker rootless)
+- Ensures proper XDG_RUNTIME_DIR setup
 
-### **Layer 3: Container Hardening**
+### Layer 3: Container Hardening
 - Configures container with tier-appropriate security flags:
   - **All tiers:** Rootless userns, localhost-only port binding, init process
   - **Hardened/Paranoid:** Read-only root, tmpfs for writable dirs, capability drop, memory/CPU/PID limits, network isolation
-- Mounts configuration as read-only (hardened+)
-- Mounts workspace as read-write with size limits
+- Runtime-specific optimizations for both Podman and Docker
 
-### **Layer 4: Host Firewall** *(Paranoid only)*
+### Layer 4: Host Firewall *(Paranoid only)*
 - Installs and configures nftables egress filtering
 - Blocks cloud metadata endpoints (169.254.0.0/16)
 - Blocks RFC1918 private networks (lateral movement prevention)
 - Allows only DNS, HTTPS (443), and established connections
-- Logs all blocked traffic with `openclaw-blocked:` prefix
 
-### **Layer 5: Monitoring** *(Paranoid only)*
+### Layer 5: Monitoring *(Paranoid only)*
 - Installs auditd and adds syscall monitoring rules
 - Watches all process execution from openclaw UID
 - Cron job checks for unauthorized network connections every minute
-- Logs anomalies to syslog with `openclaw-alert` tag
 
-### **Layer 6: Configuration**
+### Layer 6: Configuration
 - Generates `.env` file with gateway token and API keys (mode 600)
-- Creates `openclaw.json` with tier-specific security settings:
-  - **Standard:** Loopback binding, basic auth
-  - **Hardened:** LAN binding (container-internal), workspace restrictions, disabled elevated tools
-  - **Paranoid:** All hardened settings + per-agent sandboxing with docker-in-docker isolation
+- Creates `openclaw.json` with tier-specific security settings
 - Creates workspace directory structure with proper permissions
 
-### **Layer 7: Quadlet & Launch**
-- Optionally creates systemd Quadlet unit for auto-start
+### Layer 7: Systemd & Launch
+- **Podman:** Creates systemd Quadlet unit for auto-start
+- **Docker rootless:** Creates user-level systemd service
+- **Docker standard:** Creates system-level systemd service
 - Generates `launch-openclaw.sh` helper script
 - Starts the container and verifies successful launch
-- Displays connection info and security checklist
 
 ---
 
@@ -140,15 +273,17 @@ The installer implements **7 layers of security**:
 SecureClaw defends against common attack vectors:
 
 | Attack Vector | Standard | Hardened | Paranoid | Mitigation |
-|---------------|----------|----------|----------|------------|
-| **Container escape** | Partial | Strong | Strongest | Rootless user namespace + capability drop |
-| **API key theft** | Moderate | Strong | Strongest | Memory limits + read-only config + egress filtering |
-| **Lateral movement** | Weak | Moderate | Strong | Network isolation + RFC1918 blocking |
-| **Cloud metadata access** | Weak | Weak | Strong | Nftables egress rules |
-| **Resource exhaustion** | Weak | Strong | Strong | CPU/memory/PID limits |
-| **Privilege escalation** | Moderate | Strong | Strong | no-new-privileges + capability drop |
-| **Filesystem persistence** | Weak | Strong | Strong | Read-only root + tmpfs |
-| **Unauthorized network** | Weak | Weak | Strong | Audit monitoring + cron checks |
+|---------------|:--------:|:--------:|:--------:|------------|
+| **Container escape** | 🟡 | 🟢 | 🟢🟢 | Rootless user namespace + capability drop |
+| **API key theft** | 🟡 | 🟢 | 🟢🟢 | Memory limits + read-only config + egress filtering |
+| **Lateral movement** | 🔴 | 🟡 | 🟢 | Network isolation + RFC1918 blocking |
+| **Cloud metadata access** | 🔴 | 🔴 | 🟢 | Nftables egress rules |
+| **Resource exhaustion** | 🔴 | 🟢 | 🟢 | CPU/memory/PID limits |
+| **Privilege escalation** | 🟡 | 🟢 | 🟢 | no-new-privileges + capability drop |
+| **Filesystem persistence** | 🔴 | 🟢 | 🟢 | Read-only root + tmpfs |
+| **Unauthorized network** | 🔴 | 🔴 | 🟢 | Audit monitoring + cron checks |
+
+> 🟢🟢 = Strongest · 🟢 = Strong · 🟡 = Moderate · 🔴 = Weak
 
 ---
 
@@ -170,25 +305,61 @@ http://localhost:18789
 
 ### View Logs
 
-```bash
-# Container logs (if using systemd)
-sudo -u openclaw systemctl --user status openclaw
-
-# Or direct Podman logs
-sudo -u openclaw podman logs -f openclaw
-```
-
-### Stop/Restart
+<details>
+<summary><b>Podman</b></summary>
 
 ```bash
 # With systemd
+sudo -u openclaw systemctl --user status openclaw
+
+# Direct logs
+sudo -u openclaw podman logs -f openclaw
+```
+</details>
+
+<details>
+<summary><b>Docker (rootless)</b></summary>
+
+```bash
+# With systemd
+sudo -u openclaw systemctl --user status openclaw
+
+# Direct logs
+sudo -u openclaw DOCKER_HOST=unix:///run/user/$(id -u openclaw)/docker.sock docker logs -f openclaw
+```
+</details>
+
+<details>
+<summary><b>Docker (standard)</b></summary>
+
+```bash
+# With systemd
+systemctl status openclaw
+
+# Direct logs
+docker logs -f openclaw
+```
+</details>
+
+### Stop/Restart
+
+<details>
+<summary><b>Podman / Docker (rootless)</b></summary>
+
+```bash
 sudo -u openclaw systemctl --user stop openclaw
 sudo -u openclaw systemctl --user start openclaw
-
-# Without systemd
-sudo -u openclaw podman stop openclaw
-sudo -u openclaw podman start openclaw
 ```
+</details>
+
+<details>
+<summary><b>Docker (standard)</b></summary>
+
+```bash
+systemctl stop openclaw
+systemctl start openclaw
+```
+</details>
 
 ### Paranoid Tier: Monitor Threats
 
@@ -240,12 +411,13 @@ Configures OpenClaw behavior based on security tier:
 
 After installation:
 
-1. **IP-restrict your API keys** at provider dashboards (OpenAI, Anthropic, etc.)
-2. **Set spending limits** on all LLM API accounts
-3. **Use dedicated API keys** — Don't reuse keys from other projects
-4. **Monitor usage** via provider dashboards for anomalies
-5. **Keep OpenClaw updated** — Watch the [OpenClaw repo](https://github.com/openclaw/openclaw) for security patches
-6. **Review logs regularly** (especially on paranoid tier)
+1. 🔑 **IP-restrict your API keys** at provider dashboards (OpenAI, Anthropic, etc.)
+2. 💰 **Set spending limits** on all LLM API accounts
+3. 🔐 **Use dedicated API keys** — Don't reuse keys from other projects
+4. 📊 **Monitor usage** via provider dashboards for anomalies
+5. 🔄 **Keep OpenClaw updated** — Watch the [OpenClaw repo](https://github.com/openclaw/openclaw) for security patches
+6. 📋 **Review logs regularly** (especially on paranoid tier)
+7. 🏠 **Use SSH tunnels** — Never expose the gateway port to the internet
 
 ---
 
@@ -258,12 +430,13 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 - SELinux policy integration
 - Automated security testing
 - Documentation improvements
+- Docker Compose support
 
 ---
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License — see [LICENSE](LICENSE) file for details.
 
 Copyright © 2025 SecureClaw Contributors
 
@@ -271,9 +444,9 @@ Copyright © 2025 SecureClaw Contributors
 
 ## 🙏 Credits
 
-- **[OpenClaw](https://github.com/openclaw/openclaw)** — The amazing AI coding agent we're securing
-- **SecureClaw** is a community-driven hardening wrapper, not an official OpenClaw project
-- Built with ❤️ by security-conscious developers who believe in defense-in-depth
+- **[OpenClaw](https://github.com/openclaw/openclaw)** — The AI coding agent we're securing
+- **[Granus Labs](https://granuslabs.com)** — Development and maintenance of SecureClaw
+- Built with 🛡️ by security-conscious developers who believe in defense-in-depth
 
 ---
 
@@ -282,5 +455,7 @@ Copyright © 2025 SecureClaw Contributors
 **⚠️ Remember:** SecureClaw reduces risk but cannot eliminate it. Always assume compromise and plan accordingly.
 
 *"Security is a journey, not a destination."*
+
+**[Granus Labs](https://granuslabs.com)** · [Report an Issue](https://github.com/InverseAltruism/SecureClaw/issues) · [Contributing](CONTRIBUTING.md)
 
 </div>
