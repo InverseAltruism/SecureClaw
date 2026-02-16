@@ -60,7 +60,11 @@ readonly OPENCLAW_REPO_URL="https://github.com/openclaw/openclaw.git"
 readonly OPENCLAW_DEFAULT_REF="c593709d252a1efe70a8ce40d40627a35b818e46"
 readonly SECURECLAW_UNINSTALL_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/uninstall.sh"
 readonly SECURECLAW_PANIC_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/panic.sh"
-readonly SECURECLAW_CONNECT_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-from-pc.sh"
+readonly SECURECLAW_UPDATE_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/update.sh"
+readonly SECURECLAW_BACKUP_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/backup.sh"
+readonly SECURECLAW_CONNECT_LINUX_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-openclaw-linux.sh"
+readonly SECURECLAW_CONNECT_MACOS_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-openclaw-macos.sh"
+readonly SECURECLAW_CONNECT_WINDOWS_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-openclaw-windows.ps1"
 
 get_user_home() {
     local user_name="$1"
@@ -458,12 +462,20 @@ prompt_operation_mode() {
     echo "  ${BOLD}3. PANIC Stop (Emergency)${RESET}"
     dim "Immediately stop OpenClaw services, containers, and related processes"
     echo
+    echo "  ${BOLD}4. Update Existing SecureClaw Install${RESET}"
+    dim "Rebuild OpenClaw image and restart your current SecureClaw deployment"
+    echo
+    echo "  ${BOLD}5. Backup / Restore Agent Data${RESET}"
+    dim "Create encrypted-safe backups for migration, rollback, and disaster recovery"
+    echo
     menu_select \
         "Select operation" \
         "1" \
         "1|Install SecureClaw" \
         "2|Uninstall SecureClaw" \
-        "3|PANIC Stop (Emergency)"
+        "3|PANIC Stop (Emergency)" \
+        "4|Update Existing SecureClaw Install" \
+        "5|Backup / Restore Agent Data"
     OPERATION_CHOICE="${MENU_SELECTION:-1}"
     case "$OPERATION_CHOICE" in
         1)
@@ -477,6 +489,14 @@ prompt_operation_mode() {
         3)
             OPERATION_MODE="panic"
             info "Selected: PANIC Stop"
+            ;;
+        4)
+            OPERATION_MODE="update"
+            info "Selected: Update"
+            ;;
+        5)
+            OPERATION_MODE="backup"
+            info "Selected: Backup / Restore"
             ;;
         *)
             warn "Invalid selection, using Install (default)"
@@ -1733,7 +1753,7 @@ PublishPort=127.0.0.1:$BRIDGE_PORT:$BRIDGE_PORT
 # Volumes
 EOF
             
-            if [[ "$SECURITY_TIER" == "standard" ]]; then
+            if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
                 cat >> "$quadlet_file" << EOF
 Volume=$CONFIG_DIR:/home/node/.openclaw:rw
 Volume=$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw
@@ -1928,6 +1948,20 @@ layer8_install_operational_commands() {
         "$SECURECLAW_PANIC_URL" \
         "panic" || \
         warn "PANIC command installation failed; keep panic.sh available from this repository."
+
+    install_local_or_remote_script \
+        "/usr/local/bin/secureclaw-update" \
+        "$script_dir/update.sh" \
+        "$SECURECLAW_UPDATE_URL" \
+        "update" || \
+        warn "Update command installation failed; keep update.sh available from this repository."
+
+    install_local_or_remote_script \
+        "/usr/local/bin/secureclaw-backup" \
+        "$script_dir/backup.sh" \
+        "$SECURECLAW_BACKUP_URL" \
+        "backup" || \
+        warn "Backup command installation failed; keep backup.sh available from this repository."
 }
 
 # ============================================================================
@@ -1952,9 +1986,16 @@ show_final_summary() {
     echo -e "${BOLD}SSH Tunnel Command:${RESET}"
     echo -e "  ${CYAN}ssh -L $GATEWAY_PORT:127.0.0.1:$GATEWAY_PORT user@your-vps-ip${RESET}"
     echo
-    echo -e "${BOLD}PC Access Helper Script:${RESET}"
-    echo -e "  curl -fsSL $SECURECLAW_CONNECT_URL -o connect-from-pc.sh"
-    echo -e "  bash connect-from-pc.sh --host your-vps-ip --user your-vps-user"
+    echo -e "${BOLD}PC Connection Helpers:${RESET}"
+    echo -e "  Linux:"
+    echo -e "    curl -fsSL $SECURECLAW_CONNECT_LINUX_URL -o connect-openclaw-linux.sh"
+    echo -e "    bash connect-openclaw-linux.sh"
+    echo -e "  macOS:"
+    echo -e "    curl -fsSL $SECURECLAW_CONNECT_MACOS_URL -o connect-openclaw-macos.sh"
+    echo -e "    bash connect-openclaw-macos.sh"
+    echo -e "  Windows (PowerShell):"
+    echo -e "    iwr -UseBasicParsing $SECURECLAW_CONNECT_WINDOWS_URL -OutFile connect-openclaw-windows.ps1"
+    echo -e "    powershell -ExecutionPolicy Bypass -File .\\connect-openclaw-windows.ps1"
     echo
     echo -e "${BOLD}View Logs:${RESET}"
     if [[ $ENABLE_SYSTEMD -eq 1 ]]; then
@@ -2000,6 +2041,15 @@ show_final_summary() {
     echo -e "${BOLD}Uninstall:${RESET}"
     echo -e "  sudo secureclaw-uninstall"
     echo -e "  # or: sudo bash uninstall.sh (from this repository)"
+    echo
+    echo -e "${BOLD}Update:${RESET}"
+    echo -e "  sudo secureclaw-update"
+    echo -e "  # or: sudo bash update.sh (from this repository)"
+    echo -e "  # Note: SecureClaw uses container image updates; this differs from native 'openclaw update'"
+    echo
+    echo -e "${BOLD}Backup / Restore:${RESET}"
+    echo -e "  sudo secureclaw-backup"
+    echo -e "  # restore: sudo secureclaw-backup --restore /path/to/backup.tar.gz"
     echo
     echo -e "${BOLD}Emergency PANIC Stop:${RESET}"
     echo -e "  sudo secureclaw-panic"
@@ -2117,6 +2167,54 @@ panic_openclaw() {
     die "Panic script not found locally and failed to download fallback panic script."
 }
 
+update_openclaw() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local update_script="$script_dir/update.sh"
+
+    if [[ -f "$update_script" ]]; then
+        exec bash "$update_script"
+    fi
+
+    if [[ -x /usr/local/bin/secureclaw-update ]]; then
+        exec /usr/local/bin/secureclaw-update
+    fi
+
+    local temp_update
+    temp_update=$(mktemp /tmp/secureclaw-update-XXXXXX.sh)
+    if download_url_to_file "$SECURECLAW_UPDATE_URL" "$temp_update"; then
+        chmod 700 "$temp_update"
+        exec bash "$temp_update"
+    fi
+
+    rm -f "$temp_update" || true
+    die "Update script not found locally and failed to download fallback update script."
+}
+
+backup_openclaw() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local backup_script="$script_dir/backup.sh"
+
+    if [[ -f "$backup_script" ]]; then
+        exec bash "$backup_script"
+    fi
+
+    if [[ -x /usr/local/bin/secureclaw-backup ]]; then
+        exec /usr/local/bin/secureclaw-backup
+    fi
+
+    local temp_backup
+    temp_backup=$(mktemp /tmp/secureclaw-backup-XXXXXX.sh)
+    if download_url_to_file "$SECURECLAW_BACKUP_URL" "$temp_backup"; then
+        chmod 700 "$temp_backup"
+        exec bash "$temp_backup"
+    fi
+
+    rm -f "$temp_backup" || true
+    die "Backup script not found locally and failed to download fallback backup script."
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -2159,6 +2257,14 @@ main() {
     fi
     if [[ "$OPERATION_MODE" == "panic" ]]; then
         panic_openclaw
+        exit 0
+    fi
+    if [[ "$OPERATION_MODE" == "update" ]]; then
+        update_openclaw
+        exit 0
+    fi
+    if [[ "$OPERATION_MODE" == "backup" ]]; then
+        backup_openclaw
         exit 0
     fi
 

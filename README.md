@@ -91,6 +91,34 @@ sudo secureclaw-panic
 
 If `/usr/local/bin/secureclaw-panic` is unavailable, run `sudo bash panic.sh` from this repo.
 
+### Update Existing SecureClaw Installation
+
+```bash
+sudo secureclaw-update
+# optional channel alignment with OpenClaw semantics:
+sudo secureclaw-update --channel stable
+sudo secureclaw-update --channel beta
+sudo secureclaw-update --channel dev
+```
+
+If `/usr/local/bin/secureclaw-update` is unavailable, run `sudo bash update.sh` from this repo.
+
+> Note: OpenClaw has a native `openclaw update --channel stable|beta|dev` flow for direct CLI installs. SecureClaw runs OpenClaw in a hardened container, so use `secureclaw-update` for this deployment model.
+
+### Backup / Restore Agent Data (migration + recovery)
+
+```bash
+sudo secureclaw-backup
+```
+
+Restore on the same or another host:
+
+```bash
+sudo secureclaw-backup --restore /var/backups/secureclaw/secureclaw-backup-YYYYMMDD-HHMMSS.tar.gz
+```
+
+If `/usr/local/bin/secureclaw-backup` is unavailable, run `sudo bash backup.sh` from this repo.
+
 ---
 
 ## ⚠️ Why You Need SecureClaw
@@ -442,16 +470,32 @@ http://localhost:18789
 
 > 🔑 **Important:** Your gateway token is stored in `$INSTALL_DIR/.env` with mode `600`. Save it securely - you'll need it to authenticate.
 
-### 🧭 Optional PC Helper Script (recommended for non-technical users)
+### 🧭 Optional PC Helper Scripts (recommended for non-technical users)
 
-Run this on your **PC** (not on the VPS) to create the SSH tunnel automatically:
+Run one of these on your **PC** (not on the VPS) to create the SSH tunnel with guided prompts:
+
+#### Linux PC
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-from-pc.sh -o connect-from-pc.sh
-bash connect-from-pc.sh --host your-vps-ip --user your-vps-user
+curl -fsSL https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-openclaw-linux.sh -o connect-openclaw-linux.sh
+bash connect-openclaw-linux.sh
 ```
 
-The helper script will:
+#### macOS PC
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-openclaw-macos.sh -o connect-openclaw-macos.sh
+bash connect-openclaw-macos.sh
+```
+
+#### Windows PC (PowerShell)
+
+```powershell
+iwr -UseBasicParsing https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/connect-openclaw-windows.ps1 -OutFile connect-openclaw-windows.ps1
+powershell -ExecutionPolicy Bypass -File .\connect-openclaw-windows.ps1
+```
+
+All helper variants will:
 - Try to auto-detect the gateway port from `/etc/secureclaw-public.env` on your VPS
 - Fall back to port `18789` if detection is unavailable
 - Start the secure SSH tunnel and print the local dashboard URL
