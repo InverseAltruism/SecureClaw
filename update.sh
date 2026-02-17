@@ -299,14 +299,21 @@ build_new_image() {
         chmod -R a+rX "$source_dir" || die "Failed to make source tree readable for rootless build user"
     fi
 
+    # Include browser for standard/balanced tiers (full feature parity)
+    local build_args=()
+    if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
+        info "Including headless browser for full feature parity..."
+        build_args+=(--build-arg OPENCLAW_INSTALL_BROWSER=1)
+    fi
+
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-            podman build -t openclaw:local -f "$source_dir/Dockerfile" "$source_dir" || die "Podman build failed"
+            podman build ${build_args[@]+"${build_args[@]}"} -t openclaw:local -f "$source_dir/Dockerfile" "$source_dir" || die "Podman build failed"
     elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock" \
-            docker build -t openclaw:local -f "$source_dir/Dockerfile" "$source_dir" || die "Docker rootless build failed"
+            docker build ${build_args[@]+"${build_args[@]}"} -t openclaw:local -f "$source_dir/Dockerfile" "$source_dir" || die "Docker rootless build failed"
     else
-        docker build -t openclaw:local -f "$source_dir/Dockerfile" "$source_dir" || die "Docker build failed"
+        docker build ${build_args[@]+"${build_args[@]}"} -t openclaw:local -f "$source_dir/Dockerfile" "$source_dir" || die "Docker build failed"
     fi
 
     OPENCLAW_REF_RESOLVED="$resolved_ref"

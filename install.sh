@@ -1189,7 +1189,8 @@ show_summary() {
         warn "Paranoid tier may impact browser/nodes/channels depending on network and sandbox policies"
     fi
     if [[ "$CONTROL_UI_AUTH_MODE" == "compatibility" ]]; then
-        warn "Compatibility mode enables controlUi.allowInsecureAuth for easier UI access."
+        warn "Compatibility mode enables gateway.controlUi.allowInsecureAuth and"
+        warn "gateway.controlUi.dangerouslyDisableDeviceAuth for easier UI access."
         warn "Use only through SSH tunnel/Tailscale and rotate gateway tokens regularly."
     fi
     
@@ -1370,24 +1371,31 @@ layer2_container_image() {
         fi
     fi
     
+    # Build args: install headless browser for Standard/Balanced tiers (full feature parity)
+    local build_args=()
+    if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
+        info "Including headless browser and media support for full feature parity..."
+        build_args+=(--build-arg OPENCLAW_INSTALL_BROWSER=1)
+    fi
+
     info "Building OpenClaw image from $OPENCLAW_PATH..."
-    
+
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
         # Build image in the service user's rootless store.
         sudo -u "$SYSTEM_USER" \
             XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-            podman --log-level=error build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
+            podman --log-level=error build ${build_args[@]+"${build_args[@]}"} -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
             die "Failed to build container image"
     elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
         # Build as user using rootless docker
         sudo -u "$SYSTEM_USER" \
             XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
             DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock" \
-            docker build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
+            docker build ${build_args[@]+"${build_args[@]}"} -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
             die "Failed to build container image"
     else
         # Standard Docker build
-        docker build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
+        docker build ${build_args[@]+"${build_args[@]}"} -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
             die "Failed to build container image"
     fi
     
@@ -1453,23 +1461,30 @@ layer6_configuration() {
     local config_tmp
     config_tmp=$(mktemp /tmp/secureclaw-config-XXXXXX)
     local control_ui_allow_insecure="false"
+    local control_ui_disable_device_auth="false"
     if [[ "$CONTROL_UI_AUTH_MODE" == "compatibility" ]]; then
         control_ui_allow_insecure="true"
+        control_ui_disable_device_auth="true"
     fi
     if [[ "$SECURITY_TIER" == "standard" ]]; then
-        # Standard tier - compatibility-first
+        # Standard tier - compatibility-first, full features
         cat > "$config_tmp" << EOF
 {
   "gateway": {
     "mode": "local",
     "port": $GATEWAY_PORT,
-    "bind": "loopback",
+    "bind": "lan",
     "auth": {
       "mode": "token"
+    },
+    "controlUi": {
+      "allowInsecureAuth": $control_ui_allow_insecure,
+      "dangerouslyDisableDeviceAuth": $control_ui_disable_device_auth
     }
   },
-  "controlUi": {
-    "allowInsecureAuth": $control_ui_allow_insecure
+  "browser": {
+    "headless": true,
+    "noSandbox": true
   }
 }
 EOF
@@ -1483,10 +1498,15 @@ EOF
     "bind": "lan",
     "auth": {
       "mode": "token"
+    },
+    "controlUi": {
+      "allowInsecureAuth": $control_ui_allow_insecure,
+      "dangerouslyDisableDeviceAuth": $control_ui_disable_device_auth
     }
   },
-  "controlUi": {
-    "allowInsecureAuth": $control_ui_allow_insecure
+  "browser": {
+    "headless": true,
+    "noSandbox": true
   }
 }
 EOF
@@ -1500,10 +1520,11 @@ EOF
     "bind": "lan",
     "auth": {
       "mode": "token"
+    },
+    "controlUi": {
+      "allowInsecureAuth": $control_ui_allow_insecure,
+      "dangerouslyDisableDeviceAuth": $control_ui_disable_device_auth
     }
-  },
-  "controlUi": {
-    "allowInsecureAuth": $control_ui_allow_insecure
   },
   "tools": {
     "exec": {
@@ -1530,10 +1551,11 @@ EOF
     "bind": "lan",
     "auth": {
       "mode": "token"
+    },
+    "controlUi": {
+      "allowInsecureAuth": $control_ui_allow_insecure,
+      "dangerouslyDisableDeviceAuth": $control_ui_disable_device_auth
     }
-  },
-  "controlUi": {
-    "allowInsecureAuth": $control_ui_allow_insecure
   },
   "tools": {
     "exec": {
@@ -1600,14 +1622,16 @@ build_podman_args() {
         # Standard: Compatibility-first, writable config/workspace.
         PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="lan"
     elif [[ "$SECURITY_TIER" == "balanced" ]]; then
         # Balanced: Strong container hardening while preserving full OpenClaw features.
         PODMAN_ARGS+=(--read-only)  # Immutable root filesystem
+        # /tmp needs exec for Chromium child processes and ffmpeg
         # shellcheck disable=SC2054
-        PODMAN_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)
-        # shellcheck disable=SC2054
-        PODMAN_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
+        PODMAN_ARGS+=(--tmpfs /tmp:size=512m,nosuid,nodev)
+        # Note: no tmpfs on /home/node/.cache -- Playwright browser binaries are
+        # baked into the image there; a tmpfs overlay would shadow them.
+        # Runtime cache is redirected to /tmp via XDG_CACHE_HOME env var.
+        PODMAN_ARGS+=(-e XDG_CACHE_HOME=/tmp/cache)
         PODMAN_ARGS+=(--cap-drop=ALL)
         PODMAN_ARGS+=(--security-opt=no-new-privileges:true)
         [[ -n "$MEMORY_LIMIT" ]] && PODMAN_ARGS+=(--memory="$MEMORY_LIMIT")
@@ -1617,7 +1641,6 @@ build_podman_args() {
         PODMAN_ARGS+=(--network=slirp4netns:allow_host_loopback=false)
         PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="lan"
     else
         # Hardened strict / Paranoid: Maximum lockdown and workspace-only writes.
         PODMAN_ARGS+=(--read-only)  # Immutable root filesystem
@@ -1637,9 +1660,8 @@ build_podman_args() {
         # Read-only config, read-write workspace only.
         PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:ro")
         PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="lan"
     fi
-    
+
     # Image (use upstream default command for version compatibility)
     PODMAN_ARGS+=(openclaw:local)
 }
@@ -1664,14 +1686,16 @@ build_docker_args() {
         # Standard: Compatibility-first, writable config/workspace.
         DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="lan"
     elif [[ "$SECURITY_TIER" == "balanced" ]]; then
         # Balanced: Strong container hardening while preserving full OpenClaw features.
         DOCKER_ARGS+=(--read-only)
+        # /tmp needs exec for Chromium child processes and ffmpeg
         # shellcheck disable=SC2054
-        DOCKER_ARGS+=(--tmpfs /tmp:size=256m,noexec,nosuid,nodev)
-        # shellcheck disable=SC2054
-        DOCKER_ARGS+=(--tmpfs /home/node/.cache:size=128m,noexec,nosuid,nodev)
+        DOCKER_ARGS+=(--tmpfs /tmp:size=512m,nosuid,nodev)
+        # Note: no tmpfs on /home/node/.cache -- Playwright browser binaries are
+        # baked into the image there; a tmpfs overlay would shadow them.
+        # Runtime cache is redirected to /tmp via XDG_CACHE_HOME env var.
+        DOCKER_ARGS+=(-e XDG_CACHE_HOME=/tmp/cache)
         DOCKER_ARGS+=(--cap-drop=ALL)
         DOCKER_ARGS+=(--security-opt=no-new-privileges:true)
         [[ -n "$MEMORY_LIMIT" ]] && DOCKER_ARGS+=(--memory="$MEMORY_LIMIT")
@@ -1681,7 +1705,6 @@ build_docker_args() {
         DOCKER_ARGS+=(--network=bridge)
         DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="lan"
     else
         # Hardened strict / Paranoid: Maximum lockdown and workspace-only writes.
         DOCKER_ARGS+=(--read-only)  # Immutable root filesystem
@@ -1707,9 +1730,8 @@ build_docker_args() {
         
         DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:ro")
         DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
-        BIND_MODE="lan"
     fi
-    
+
     # Image (use upstream default command for version compatibility)
     DOCKER_ARGS+=(openclaw:local)
 }
@@ -1954,6 +1976,7 @@ AutoUpdate=registry
 # User and namespaces
 User=$USER_UID:$USER_GID
 UserNS=keep-id
+PodmanArgs=--init
 
 # Environment
 Environment=HOME=/home/node
@@ -1979,11 +2002,31 @@ Volume=$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw
 EOF
             fi
             
-            # Add hardened/paranoid flags
-            if [[ "$SECURITY_TIER" != "standard" ]]; then
+            # Add tier-specific hardening flags
+            if [[ "$SECURITY_TIER" == "balanced" ]]; then
                 cat >> "$quadlet_file" << EOF
 
-# Security hardening
+# Security hardening (balanced: full features + strong isolation)
+ReadOnly=true
+Tmpfs=/tmp:size=512m,nosuid,nodev
+Environment=XDG_CACHE_HOME=/tmp/cache
+DropCapability=ALL
+SecurityLabelDisable=true
+NoNewPrivileges=true
+
+# Resource limits
+Memory=$MEMORY_LIMIT
+MemorySwap=$MEMORY_LIMIT
+CPUQuota=$(cpu_quota_percent_from_limit "$CPU_LIMIT")%
+PidsLimit=$PID_LIMIT
+
+# Network
+Network=slirp4netns:allow_host_loopback=false
+EOF
+            elif [[ "$SECURITY_TIER" == "hardened" || "$SECURITY_TIER" == "paranoid" ]]; then
+                cat >> "$quadlet_file" << EOF
+
+# Security hardening (maximum lockdown)
 ReadOnly=true
 Tmpfs=/tmp:size=256m,noexec,nosuid,nodev
 Tmpfs=/home/node/.cache:size=128m,noexec,nosuid,nodev
@@ -2222,11 +2265,11 @@ show_final_summary() {
     if [[ "$CONTROL_UI_AUTH_MODE" == "strict" ]]; then
         echo -e "  Strict pairing (recommended)"
     else
-        echo -e "  Compatibility (allowInsecureAuth enabled)"
+        echo -e "  Compatibility (allowInsecureAuth + dangerouslyDisableDeviceAuth enabled)"
     fi
     echo
-    echo -e "${BOLD}Gateway Token:${RESET}"
-    echo -e "  ${GATEWAY_TOKEN:0:16}...${GATEWAY_TOKEN: -8}"
+    echo -e "${BOLD}Gateway Token (paste into Control UI on first connect):${RESET}"
+    echo -e "  $GATEWAY_TOKEN"
     echo
     echo -e "${BOLD}SSH Tunnel Command:${RESET}"
     echo -e "  ${CYAN}ssh -L $GATEWAY_PORT:127.0.0.1:$GATEWAY_PORT user@your-vps-ip${RESET}"
@@ -2320,19 +2363,23 @@ show_final_summary() {
 
     echo -e "${BOLD}Post-Install Access Checklist:${RESET}"
     if [[ "$CONTROL_UI_AUTH_MODE" == "strict" ]]; then
-        echo -e "  1. Open dashboard: http://localhost:$GATEWAY_PORT"
-        echo -e "  2. Enter your gateway token"
-        echo -e "  3. If you see pairing required (1008), run:"
+        echo -e "  1. SSH tunnel to VPS then open: http://localhost:$GATEWAY_PORT"
+        echo -e "  2. Paste the gateway token above into the 'Gateway Token' field"
+        echo -e "  3. Click 'Connect'"
+        echo -e "  4. If you see 'pairing required (1008)', approve the device:"
         echo -e "     $pair_list_cmd"
         echo -e "     $pair_approve_cmd"
-        echo -e "  4. Reconnect dashboard after approval"
+        echo -e "  5. Reconnect dashboard after approval"
     else
-        echo -e "  1. Open dashboard: http://localhost:$GATEWAY_PORT"
-        echo -e "  2. Enter your gateway token"
-        echo -e "  3. Compatibility mode is enabled (allowInsecureAuth=true)"
+        echo -e "  1. SSH tunnel to VPS then open: http://localhost:$GATEWAY_PORT"
+        echo -e "  2. Paste the gateway token above into the 'Gateway Token' field"
+        echo -e "  3. Click 'Connect'"
         echo -e "  4. Keep gateway behind SSH tunnel/Tailscale only"
         echo -e "  5. Rotate OPENCLAW_GATEWAY_TOKEN regularly"
     fi
+    echo
+    echo -e "${BOLD}Retrieve Token Later:${RESET}"
+    echo -e "  sudo grep OPENCLAW_GATEWAY_TOKEN $CONFIG_DIR/.env"
     echo
     echo -e "${BOLD}Active Security Layers (${SECURITY_TIER} tier, ${CONTAINER_RUNTIME} runtime):${RESET}"
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
