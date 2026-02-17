@@ -29,6 +29,7 @@ CONTAINER_RUNTIME="podman"
 ENABLE_SYSTEMD=1
 GATEWAY_PORT="18789"
 OPENCLAW_REF_RESOLVED="unknown"
+SECURITY_TIER=""
 USER_UID=""
 USER_HOME=""
 XDG_RUNTIME_DIR=""
@@ -121,6 +122,7 @@ load_install_state() {
             ENABLE_SYSTEMD) ENABLE_SYSTEMD="$value" ;;
             GATEWAY_PORT) GATEWAY_PORT="$value" ;;
             OPENCLAW_REF_RESOLVED) OPENCLAW_REF_RESOLVED="$value" ;;
+            SECURITY_TIER) SECURITY_TIER="$value" ;;
             *) ;;
         esac
     done < "$SECURECLAW_INSTALL_STATE_FILE"
@@ -138,6 +140,20 @@ load_install_state() {
     if [[ "$CONTAINER_RUNTIME" != "docker" ]]; then
         loginctl enable-linger "$SYSTEM_USER" >/dev/null 2>&1 || true
         install -d -m 700 -o "$SYSTEM_USER" -g "$SYSTEM_USER" "$XDG_RUNTIME_DIR"
+    fi
+}
+
+run_container_exec() {
+    local cmd="$1"
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            podman exec openclaw sh -lc "$cmd"
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock" \
+            docker exec openclaw sh -lc "$cmd"
+    else
+        docker exec openclaw sh -lc "$cmd"
     fi
 }
 
@@ -400,6 +416,22 @@ main() {
     build_new_image "$source_dir"
     restart_openclaw
     verify_running
+
+    # Post-restart: Re-initialize OpenClaw workspace inside container.
+    # This ensures workspace scaffold and session directories exist after update,
+    # which are required for channel plugins and config schema support.
+    if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
+        info "Initializing OpenClaw workspace inside container..."
+        sleep 2
+        local setup_cmd='if [ -f openclaw.mjs ]; then node openclaw.mjs setup --workspace /home/node/.openclaw/workspace; else node dist/index.js setup --workspace /home/node/.openclaw/workspace; fi'
+        if run_container_exec "$setup_cmd" 2>/dev/null; then
+            info "Workspace initialized successfully"
+        else
+            warn "Workspace initialization did not complete (non-fatal)."
+            warn "You can run it manually later from inside the container."
+        fi
+    fi
+
     update_install_manifest_ref
 
     section "Update Complete"

@@ -104,6 +104,20 @@ user_systemd_available() {
     run_user_systemctl "$user_name" show-environment >/dev/null 2>&1
 }
 
+run_container_exec() {
+    local cmd="$1"
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            podman exec openclaw sh -lc "$cmd"
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock" \
+            docker exec openclaw sh -lc "$cmd"
+    else
+        docker exec openclaw sh -lc "$cmd"
+    fi
+}
+
 next_subid_start() {
     local file_path="$1"
     local max_end=100000
@@ -1466,6 +1480,8 @@ layer6_configuration() {
         control_ui_allow_insecure="true"
         control_ui_disable_device_auth="true"
     fi
+    local wizard_timestamp
+    wizard_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     if [[ "$SECURITY_TIER" == "standard" ]]; then
         # Standard tier - compatibility-first, full features
         cat > "$config_tmp" << EOF
@@ -1481,6 +1497,17 @@ layer6_configuration() {
       "allowInsecureAuth": $control_ui_allow_insecure,
       "dangerouslyDisableDeviceAuth": $control_ui_disable_device_auth
     }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspace"
+    }
+  },
+  "wizard": {
+    "lastRunAt": "$wizard_timestamp",
+    "lastRunVersion": "secureclaw",
+    "lastRunCommand": "setup",
+    "lastRunMode": "local"
   },
   "browser": {
     "headless": true,
@@ -1504,6 +1531,17 @@ EOF
       "dangerouslyDisableDeviceAuth": $control_ui_disable_device_auth
     }
   },
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspace"
+    }
+  },
+  "wizard": {
+    "lastRunAt": "$wizard_timestamp",
+    "lastRunVersion": "secureclaw",
+    "lastRunCommand": "setup",
+    "lastRunMode": "local"
+  },
   "browser": {
     "headless": true,
     "noSandbox": true
@@ -1525,6 +1563,17 @@ EOF
       "allowInsecureAuth": $control_ui_allow_insecure,
       "dangerouslyDisableDeviceAuth": $control_ui_disable_device_auth
     }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspace"
+    }
+  },
+  "wizard": {
+    "lastRunAt": "$wizard_timestamp",
+    "lastRunVersion": "secureclaw",
+    "lastRunCommand": "setup",
+    "lastRunMode": "local"
   },
   "tools": {
     "exec": {
@@ -1557,21 +1606,9 @@ EOF
       "dangerouslyDisableDeviceAuth": $control_ui_disable_device_auth
     }
   },
-  "tools": {
-    "exec": {
-      "applyPatch": {
-        "workspaceOnly": true
-      }
-    },
-    "fs": {
-      "workspaceOnly": true
-    },
-    "elevated": {
-      "allowFrom": []
-    }
-  },
   "agents": {
     "defaults": {
+      "workspace": "/home/node/.openclaw/workspace",
       "sandbox": {
         "mode": "all",
         "scope": "session",
@@ -1584,6 +1621,25 @@ EOF
           "memory": "512m"
         }
       }
+    }
+  },
+  "wizard": {
+    "lastRunAt": "$wizard_timestamp",
+    "lastRunVersion": "secureclaw",
+    "lastRunCommand": "setup",
+    "lastRunMode": "local"
+  },
+  "tools": {
+    "exec": {
+      "applyPatch": {
+        "workspaceOnly": true
+      }
+    },
+    "fs": {
+      "workspaceOnly": true
+    },
+    "elevated": {
+      "allowFrom": []
     }
   }
 }
@@ -2203,7 +2259,23 @@ EOF
             warn "Container may not have started properly"
         fi
     fi
-    
+
+    # Post-start: Initialize OpenClaw workspace and sessions inside container.
+    # This runs "openclaw setup" to create workspace scaffold (bootstrap files)
+    # and session directories, which are required for full feature support
+    # (channel plugins, config schema, etc.).
+    if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
+        info "Initializing OpenClaw workspace inside container..."
+        sleep 2  # Give the gateway a moment to start
+        local setup_cmd='if [ -f openclaw.mjs ]; then node openclaw.mjs setup --workspace /home/node/.openclaw/workspace; else node dist/index.js setup --workspace /home/node/.openclaw/workspace; fi'
+        if run_container_exec "$setup_cmd" 2>/dev/null; then
+            info "Workspace initialized successfully"
+        else
+            warn "Workspace initialization did not complete (non-fatal)."
+            warn "You can run it manually later from inside the container."
+        fi
+    fi
+
     info "Layer 7 complete"
 }
 
