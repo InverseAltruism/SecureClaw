@@ -2,7 +2,7 @@
 
 # 🛡️ SecureClaw
 
-### *Run OpenClaw in a fortress. Maximum isolation. Zero trust.*
+### *Run OpenClaw with secure defaults and peace of mind.*
 
 <br>
 
@@ -46,7 +46,7 @@
 
 It supports both **Podman** (rootless) and **Docker** (rootless or standard+hardened), giving you full control over your container runtime while maintaining maximum security.
 
-Designed for VPS deployments where you assume **complete hostile takeover** of the container, SecureClaw implements multiple security boundaries to minimize blast radius and protect your host system, API keys, and data.
+Designed for VPS deployments where secure defaults matter, SecureClaw applies multiple protective boundaries to reduce risk and help protect your host system, API keys, and data.
 
 ---
 
@@ -61,9 +61,11 @@ curl -fsSL https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/ins
 - The installer can fetch OpenClaw automatically (users do not need to clone OpenClaw).
 - Default flow is **Quick Secure Install** for non-technical users.
 - Quick mode uses the **Balanced** tier by default (secure + full OpenClaw compatibility).
+- Control UI access defaults to **Strict pairing** (secure by default).
 - Use **↑/↓ + Enter** for guided menus, or press the number key directly.
 - Press **Enter** to accept recommended secure defaults.
-- By default, SecureClaw pins OpenClaw to a reviewed commit. You can override with `--openclaw-ref <ref>`.
+- By default, SecureClaw installs the latest stable OpenClaw release tag.
+- You can override with `--openclaw-ref <ref>` to install `main`, a specific tag, or a commit.
 
 ### Advanced Install (optional)
 
@@ -268,7 +270,7 @@ Choose your security posture during installation:
 
 ## 🧭 Interactive Setup Flow
 
-The installer will guide you through **9 interactive setup sections**:
+The installer will guide you through **10 interactive setup sections**:
 
 <div align="center">
 
@@ -276,23 +278,25 @@ The installer will guide you through **9 interactive setup sections**:
 ┌─────────────────────────────────────────────────────────────────┐
 │                    INSTALLATION WORKFLOW                        │
 ├─────────────────────────────────────────────────────────────────┤
-│  📊 Section 1/9  System Information                             │
+│  📊 Section 1/10 System Information                             │
 │     └─ Auto-detected OS, RAM, CPUs                              │
-│  🐳 Section 2/9  Container Runtime                              │
+│  🐳 Section 2/10 Container Runtime                              │
 │     └─ Podman / Docker rootless / Docker                        │
-│  🔐 Section 3/9  Security Level                                 │
+│  🔐 Section 3/10 Security Level                                 │
 │     └─ Standard / Balanced / Hardened (strict) / Paranoid       │
-│  📁 Section 4/9  Installation Directory                         │
+│  📁 Section 4/10 Installation Directory                         │
 │     └─ Where to install OpenClaw                                │
-│  👤 Section 5/9  System User                                    │
+│  👤 Section 5/10 System User                                    │
 │     └─ Dedicated service user                                   │
-│  🌐 Section 6/9  Gateway Port & Token                           │
+│  🌐 Section 6/10 Gateway Port & Token                           │
 │     └─ Network port + auth token                                │
-│  🔑 Section 7/9  API Keys                                       │
+│  🔒 Section 7/10 Control UI Access Mode                         │
+│     └─ Strict pairing (default) / Compatibility mode            │
+│  🔑 Section 8/10 API Keys                                       │
 │     └─ LLM provider keys (optional)                             │
-│  ⚙️  Section 8/9  Systemd Auto-Start                            │
+│  ⚙️  Section 9/10 Systemd Auto-Start                            │
 │     └─ Boot persistence                                         │
-│  💾 Section 9/9  Resource Limits                                │
+│  💾 Section 10/10 Resource Limits                               │
 │     └─ CPU/RAM/PID constraints                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -337,7 +341,7 @@ The installer implements **7 layers of defense-in-depth security**:
 
 <br>
 
-- ✅ Uses local OpenClaw source or clones a pinned upstream OpenClaw ref
+- ✅ Uses local OpenClaw source or clones the requested upstream OpenClaw ref (default: latest stable release)
 - ✅ Builds OpenClaw container image using official Dockerfile
 - ✅ Builds image directly in the service user's rootless store
 - ✅ Ensures proper XDG_RUNTIME_DIR setup
@@ -450,7 +454,11 @@ After installation, do these steps in order:
 2. Create an SSH tunnel from your PC to the VPS.
 3. Open the dashboard in your local browser (`http://localhost:<port>`).
 4. Authenticate with your gateway token from `~/.openclaw/.env` on the VPS.
-5. If you skipped API keys during install, add them to `.env` and restart OpenClaw.
+5. If you selected **Strict pairing** and see pairing required (`1008`), approve the pending device from the container:
+   - Podman list: `sudo -u openclaw XDG_RUNTIME_DIR=/run/user/$(id -u openclaw) podman exec openclaw sh -lc 'if [ -f openclaw.mjs ]; then node openclaw.mjs devices list --url ws://127.0.0.1:18789 --token "$OPENCLAW_GATEWAY_TOKEN"; else node dist/index.js devices list --url ws://127.0.0.1:18789 --token "$OPENCLAW_GATEWAY_TOKEN"; fi'`
+   - Podman approve: `sudo -u openclaw XDG_RUNTIME_DIR=/run/user/$(id -u openclaw) podman exec openclaw sh -lc 'if [ -f openclaw.mjs ]; then node openclaw.mjs devices approve <device-id> --url ws://127.0.0.1:18789 --token "$OPENCLAW_GATEWAY_TOKEN"; else node dist/index.js devices approve <device-id> --url ws://127.0.0.1:18789 --token "$OPENCLAW_GATEWAY_TOKEN"; fi'`
+6. If you selected **Compatibility mode**, keep access tunnel-only (SSH/Tailscale), never public, and rotate gateway tokens regularly.
+7. If you skipped API keys during install, add them to `.env` and restart OpenClaw.
 
 ---
 
@@ -662,7 +670,7 @@ Copyright © 2025 SecureClaw Contributors
 
 <div align="center">
 
-**⚠️ Remember:** SecureClaw reduces risk but cannot eliminate it. Always assume compromise and plan accordingly.
+**⚠️ Remember:** SecureClaw significantly improves your security posture, but no tool can eliminate all risk. Keep regular backups and apply updates promptly.
 
 *"Security is a journey, not a destination."*
 

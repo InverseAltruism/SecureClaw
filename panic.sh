@@ -86,6 +86,7 @@ panic_stop_systemd() {
     systemctl mask openclaw.service >/dev/null 2>&1 || true
 
     if [[ $USER_EXISTS -eq 1 ]]; then
+        install -d -m 700 -o "$SYSTEM_USER" -g "$SYSTEM_USER" "$USER_RUNTIME_DIR"
         info "Stopping user-level openclaw.service for $SYSTEM_USER (if present)..."
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
             systemctl --user stop openclaw.service >/dev/null 2>&1 || true
@@ -113,6 +114,7 @@ panic_stop_containers() {
     fi
 
     if [[ $USER_EXISTS -eq 1 ]]; then
+        install -d -m 700 -o "$SYSTEM_USER" -g "$SYSTEM_USER" "$USER_RUNTIME_DIR"
         if command -v podman >/dev/null 2>&1; then
             info "Stopping/removing rootless Podman OpenClaw containers for $SYSTEM_USER (if present)..."
             local podman_names=()

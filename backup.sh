@@ -119,6 +119,32 @@ parse_args() {
     done
 }
 
+validate_archive_paths() {
+    local archive="$1"
+    local entry=""
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        if [[ "$entry" == /* ]]; then
+            die "Backup archive contains absolute path entry: $entry"
+        fi
+        if [[ "$entry" == *"../"* || "$entry" == "../"* || "$entry" == *"/.." ]]; then
+            die "Backup archive contains unsafe traversal path: $entry"
+        fi
+    done < <(tar -tzf "$archive")
+}
+
+read_manifest_value() {
+    local manifest_path="$1"
+    local manifest_key="$2"
+    local line=""
+    while IFS= read -r line; do
+        [[ "$line" == "$manifest_key="* ]] || continue
+        echo "${line#*=}"
+        return 0
+    done < "$manifest_path"
+    return 1
+}
+
 load_state_if_present() {
     if [[ -f "$SECURECLAW_INSTALL_STATE_FILE" ]]; then
         while IFS='=' read -r key value; do
@@ -214,7 +240,6 @@ ensure_system_user_exists() {
 
 restart_service_best_effort() {
     local system_user="$1"
-    local runtime="${2:-}"
     if [[ "$NO_RESTART" -eq 1 ]]; then
         return
     fi
@@ -230,11 +255,23 @@ restart_service_best_effort() {
     uid="$(id -u "$system_user" 2>/dev/null || true)"
     if [[ -n "$uid" ]]; then
         local runtime_dir="/run/user/$uid"
+        install -d -m 700 -o "$system_user" -g "$system_user" "$runtime_dir"
         sudo -u "$system_user" XDG_RUNTIME_DIR="$runtime_dir" systemctl --user daemon-reload >/dev/null 2>&1 || true
         sudo -u "$system_user" XDG_RUNTIME_DIR="$runtime_dir" systemctl --user restart openclaw.service >/dev/null 2>&1 || true
-        if [[ "$runtime" == "podman" ]]; then
-            sudo -u "$system_user" XDG_RUNTIME_DIR="$runtime_dir" podman rm -f openclaw >/dev/null 2>&1 || true
-        fi
+    fi
+}
+
+stop_service_best_effort() {
+    local system_user="$1"
+    if [[ -f "/etc/systemd/system/openclaw.service" ]]; then
+        systemctl stop openclaw.service >/dev/null 2>&1 || true
+    fi
+    local uid
+    uid="$(id -u "$system_user" 2>/dev/null || true)"
+    if [[ -n "$uid" ]]; then
+        local runtime_dir="/run/user/$uid"
+        install -d -m 700 -o "$system_user" -g "$system_user" "$runtime_dir"
+        sudo -u "$system_user" XDG_RUNTIME_DIR="$runtime_dir" systemctl --user stop openclaw.service >/dev/null 2>&1 || true
     fi
 }
 
@@ -249,18 +286,22 @@ restore_backup() {
     tmp_dir="$(mktemp -d /tmp/secureclaw-restore-XXXXXX)"
     trap 'rm -rf "$tmp_dir" >/dev/null 2>&1 || true' EXIT
 
+    validate_archive_paths "$ARCHIVE_PATH"
     tar -xzf "$ARCHIVE_PATH" -C "$tmp_dir"
     local bundle_dir
     bundle_dir="$(ls -d "$tmp_dir"/secureclaw-backup-* 2>/dev/null | head -n1 || true)"
     [[ -n "$bundle_dir" ]] || die "Invalid backup archive structure."
 
-    [[ -f "$bundle_dir/meta/manifest.env" ]] || die "Missing manifest.env in backup."
-    # shellcheck disable=SC1090
-    source "$bundle_dir/meta/manifest.env"
+    local manifest_path="$bundle_dir/meta/manifest.env"
+    [[ -f "$manifest_path" ]] || die "Missing manifest.env in backup."
 
-    local restore_user="${SYSTEM_USER:-openclaw}"
-    local restore_dir="${INSTALL_DIR:-}"
-    local restore_runtime="${CONTAINER_RUNTIME:-}"
+    local restore_user=""
+    local restore_dir=""
+    local restore_runtime=""
+    restore_user="$(read_manifest_value "$manifest_path" "SYSTEM_USER" || true)"
+    restore_dir="$(read_manifest_value "$manifest_path" "INSTALL_DIR" || true)"
+    restore_runtime="$(read_manifest_value "$manifest_path" "CONTAINER_RUNTIME" || true)"
+    restore_user="${restore_user:-openclaw}"
     [[ -n "$restore_dir" ]] || die "Restore manifest missing INSTALL_DIR."
 
     info "Backup metadata:"
@@ -269,6 +310,7 @@ restore_backup() {
     info "  Runtime    : $restore_runtime"
 
     ensure_system_user_exists "$restore_user"
+    stop_service_best_effort "$restore_user"
     mkdir -p "$restore_dir"
 
     if [[ -f "$bundle_dir/meta/agent-data.sha256" ]]; then
@@ -276,6 +318,7 @@ restore_backup() {
     fi
 
     info "Restoring agent data into $restore_dir..."
+    validate_archive_paths "$bundle_dir/agent-data.tar.gz"
     tar -xzf "$bundle_dir/agent-data.tar.gz" -C "$restore_dir"
     chown -R "$restore_user:$restore_user" "$restore_dir"
     chmod 700 "$restore_dir" || true
@@ -309,7 +352,7 @@ restore_backup() {
         chown -R "$restore_user:$restore_user" "$user_home/.config/systemd" "$user_home/.config/containers" 2>/dev/null || true
     fi
 
-    restart_service_best_effort "$restore_user" "$restore_runtime"
+    restart_service_best_effort "$restore_user"
 
     info "Restore completed."
     if [[ "$NO_RESTART" -eq 1 ]]; then

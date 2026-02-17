@@ -54,6 +54,21 @@ function Test-Port([int]$Port) {
     return $Port -ge 1 -and $Port -le 65535
 }
 
+function Wait-LocalTunnel([int]$Port, [int]$Retries = 10) {
+    for ($i = 0; $i -lt $Retries; $i++) {
+        try {
+            if (Test-NetConnection -ComputerName "127.0.0.1" -Port $Port -InformationLevel Quiet -WarningAction SilentlyContinue) {
+                return $true
+            }
+        } catch {
+            Start-Sleep -Seconds 1
+            continue
+        }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
 function Detect-RemotePort {
     param(
         [string]$HostName,
@@ -101,6 +116,7 @@ if ([string]::IsNullOrWhiteSpace($IdentityFile)) {
 if ([string]::IsNullOrWhiteSpace($VpsHost)) { Die "VPS host is required." }
 if ([string]::IsNullOrWhiteSpace($SshUser)) { Die "SSH user is required." }
 if (-not (Test-Port $SshPort)) { Die "Invalid SSH port: $SshPort" }
+if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) { Die "ssh.exe not found in PATH." }
 if (-not [string]::IsNullOrWhiteSpace($IdentityFile) -and -not (Test-Path -Path $IdentityFile)) {
     Die "Identity file not found: $IdentityFile"
 }
@@ -156,6 +172,9 @@ if ($Foreground) {
     & ssh @sshTunnelArgs
 } else {
     Start-Process -FilePath "ssh" -ArgumentList $sshTunnelArgs -WindowStyle Hidden | Out-Null
+    if (-not (Wait-LocalTunnel -Port $LocalPort)) {
+        Die "SSH process started but local tunnel port $LocalPort did not become reachable."
+    }
     Info "Tunnel active. Open this URL: $dashboardUrl"
     if (-not $NoOpen) {
         Start-Process $dashboardUrl | Out-Null

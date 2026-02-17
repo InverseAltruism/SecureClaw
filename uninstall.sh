@@ -146,10 +146,36 @@ resolve_runtime_context() {
     fi
 }
 
+report_residual_port_listeners() {
+    section "Uninstall: residual port listeners"
+
+    if ! command -v ss >/dev/null 2>&1; then
+        info "ss command not available; skipping listener check"
+        return
+    fi
+
+    local port=""
+    for port in "$GATEWAY_PORT" "$BRIDGE_PORT"; do
+        [[ "$port" =~ ^[0-9]+$ ]] || continue
+        local listeners=""
+        listeners="$(ss -ltnp "sport = :$port" 2>/dev/null | awk 'NR>1 {print $4 " " $6}')"
+        if [[ -z "$listeners" ]]; then
+            info "No listener on port $port"
+            continue
+        fi
+        warn "Port $port is still in use by non-SecureClaw process(es):"
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            echo "  $line"
+        done <<< "$listeners"
+    done
+}
+
 cleanup_systemd_units() {
     section "Uninstall: systemd units"
 
     if [[ $USER_EXISTS -eq 1 && -n "$USER_HOME" ]]; then
+        install -d -m 700 -o "$SYSTEM_USER" -g "$SYSTEM_USER" "$USER_RUNTIME_DIR"
         info "Stopping user-level OpenClaw service (if present)..."
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
             systemctl --user disable --now openclaw.service >/dev/null 2>&1 || true
@@ -169,14 +195,26 @@ cleanup_containers_and_images() {
     section "Uninstall: containers and images"
 
     if command -v podman >/dev/null 2>&1 && [[ $USER_EXISTS -eq 1 ]]; then
+        install -d -m 700 -o "$SYSTEM_USER" -g "$SYSTEM_USER" "$USER_RUNTIME_DIR"
         info "Removing rootless Podman container/image (if present)..."
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
             podman rm -f openclaw >/dev/null 2>&1 || true
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
             podman image rm openclaw:local >/dev/null 2>&1 || true
+        local podman_openclaw_images=()
+        local image_ref=""
+        while IFS= read -r image_ref; do
+            [[ -n "$image_ref" ]] || continue
+            podman_openclaw_images+=("$image_ref")
+        done < <(sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" podman images --format '{{.Repository}}:{{.Tag}}' | awk '/^openclaw:/ {print $0}')
+        if [[ ${#podman_openclaw_images[@]} -gt 0 ]]; then
+            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+                podman image rm "${podman_openclaw_images[@]}" >/dev/null 2>&1 || true
+        fi
     fi
 
     if command -v docker >/dev/null 2>&1 && [[ $USER_EXISTS -eq 1 ]]; then
+        install -d -m 700 -o "$SYSTEM_USER" -g "$SYSTEM_USER" "$USER_RUNTIME_DIR"
         info "Removing rootless Docker container/image (if present)..."
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
             DOCKER_HOST="unix://$USER_RUNTIME_DIR/docker.sock" \
@@ -190,6 +228,44 @@ cleanup_containers_and_images() {
         info "Removing standard Docker container/image (if present)..."
         docker rm -f openclaw >/dev/null 2>&1 || true
         docker image rm openclaw:local >/dev/null 2>&1 || true
+    fi
+}
+
+cleanup_runtime_cache_state() {
+    section "Uninstall: runtime cache and state"
+
+    if [[ $USER_EXISTS -ne 1 ]]; then
+        info "System user not present, skipping rootless runtime cache cleanup"
+        return
+    fi
+
+    local purge_rootless_cache=0
+    if [[ "${USER_CREATED_BY_SECURECLAW:-0}" -eq 1 ]]; then
+        purge_rootless_cache=1
+    else
+        warn "User $SYSTEM_USER was not marked as SecureClaw-created."
+        if prompt_confirm "Also remove rootless Podman cache/state for this user? [y/N]:" "N"; then
+            purge_rootless_cache=1
+        fi
+    fi
+
+    if [[ "$purge_rootless_cache" -ne 1 ]]; then
+        info "Keeping rootless runtime cache/state for $SYSTEM_USER"
+        return
+    fi
+
+    install -d -m 700 -o "$SYSTEM_USER" -g "$SYSTEM_USER" "$USER_RUNTIME_DIR"
+
+    if command -v podman >/dev/null 2>&1; then
+        info "Pruning rootless Podman build/cache state for $SYSTEM_USER..."
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+            podman builder prune -af >/dev/null 2>&1 || true
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+            podman image prune -af >/dev/null 2>&1 || true
+        rm -rf "$USER_HOME/.local/share/containers" >/dev/null 2>&1 || true
+        rm -rf "$USER_HOME/.config/containers" >/dev/null 2>&1 || true
+        rm -rf "$USER_RUNTIME_DIR/containers" >/dev/null 2>&1 || true
+        rm -rf "$USER_RUNTIME_DIR/podman" >/dev/null 2>&1 || true
     fi
 }
 
@@ -359,6 +435,7 @@ main() {
 
     cleanup_systemd_units
     cleanup_containers_and_images
+    cleanup_runtime_cache_state
     cleanup_install_dir
     cleanup_paranoid_artifacts
     cleanup_subid_mappings
@@ -366,6 +443,7 @@ main() {
     cleanup_packages
     cleanup_system_user
     cleanup_install_state
+    report_residual_port_listeners
 
     section "Uninstall Complete"
     info "SecureClaw uninstall finished."

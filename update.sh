@@ -27,6 +27,7 @@ SYSTEM_USER="openclaw"
 INSTALL_DIR=""
 CONTAINER_RUNTIME="podman"
 ENABLE_SYSTEMD=1
+GATEWAY_PORT="18789"
 OPENCLAW_REF_RESOLVED="unknown"
 USER_UID=""
 USER_HOME=""
@@ -118,6 +119,7 @@ load_install_state() {
             INSTALL_DIR) INSTALL_DIR="$value" ;;
             CONTAINER_RUNTIME) CONTAINER_RUNTIME="$value" ;;
             ENABLE_SYSTEMD) ENABLE_SYSTEMD="$value" ;;
+            GATEWAY_PORT) GATEWAY_PORT="$value" ;;
             OPENCLAW_REF_RESOLVED) OPENCLAW_REF_RESOLVED="$value" ;;
             *) ;;
         esac
@@ -132,6 +134,11 @@ load_install_state() {
     [[ -n "$INSTALL_DIR" ]] || INSTALL_DIR="$USER_HOME/.openclaw"
     [[ -d "$INSTALL_DIR" ]] || die "Install directory not found: $INSTALL_DIR"
     [[ -f "$INSTALL_DIR/launch-openclaw.sh" ]] || die "Launch script missing: $INSTALL_DIR/launch-openclaw.sh"
+
+    if [[ "$CONTAINER_RUNTIME" != "docker" ]]; then
+        loginctl enable-linger "$SYSTEM_USER" >/dev/null 2>&1 || true
+        install -d -m 700 -o "$SYSTEM_USER" -g "$SYSTEM_USER" "$XDG_RUNTIME_DIR"
+    fi
 }
 
 latest_release_ref() {
@@ -188,7 +195,10 @@ choose_target_ref() {
     case "$ARG_CHANNEL" in
         stable)
             latest_tag="$(latest_release_ref || true)"
-            default_ref="${latest_tag:-$OPENCLAW_DEFAULT_REF}"
+            default_ref="${latest_tag:-$OPENCLAW_REF_RESOLVED}"
+            if [[ -z "$default_ref" || "$default_ref" == "unknown" ]]; then
+                default_ref="$OPENCLAW_DEFAULT_REF"
+            fi
             ;;
         beta)
             latest_beta="$(latest_beta_ref || true)"
@@ -270,6 +280,8 @@ backup_current_image() {
 checkout_openclaw_ref() {
     local workdir
     workdir="$(mktemp -d /tmp/openclaw-update-XXXXXX)"
+    # Rootless runtime build users must be able to traverse temporary sources.
+    chmod 755 "$workdir" || die "Failed to adjust temporary checkout directory permissions"
     git clone --filter=blob:none --no-checkout "$OPENCLAW_REPO_URL" "$workdir" >/dev/null 2>&1 || die "Failed to clone OpenClaw"
     git -C "$workdir" fetch --depth 1 origin "$TARGET_REF" >/dev/null 2>&1 || die "Failed to fetch ref: $TARGET_REF"
     git -C "$workdir" checkout --detach FETCH_HEAD >/dev/null 2>&1 || die "Failed to checkout ref: $TARGET_REF"
@@ -282,6 +294,10 @@ build_new_image() {
     local resolved_ref
     resolved_ref="$(git -C "$source_dir" rev-parse HEAD)"
     info "Resolved ref: $resolved_ref"
+
+    if [[ "$CONTAINER_RUNTIME" == "podman" || "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        chmod -R a+rX "$source_dir" || die "Failed to make source tree readable for rootless build user"
+    fi
 
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
@@ -338,6 +354,21 @@ verify_running() {
     fi
 
     [[ "$ok" -eq 1 ]] || die "Update finished but container is not running."
+
+    if [[ "$GATEWAY_PORT" =~ ^[0-9]+$ ]] && command -v ss >/dev/null 2>&1; then
+        local retries=0
+        while (( retries < 20 )); do
+            if ss -ltn "sport = :$GATEWAY_PORT" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found ? 0 : 1)}'; then
+                info "Gateway listener detected on 127.0.0.1:$GATEWAY_PORT"
+                info "OpenClaw container is running."
+                return
+            fi
+            sleep 1
+            retries=$((retries + 1))
+        done
+        die "Container is running but gateway port $GATEWAY_PORT is not listening after 20s."
+    fi
+
     info "OpenClaw container is running."
 }
 

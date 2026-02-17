@@ -90,6 +90,18 @@ open_browser() {
     fi
 }
 
+wait_for_local_tunnel() {
+    local retries=0
+    while (( retries < 10 )); do
+        if (echo >"/dev/tcp/127.0.0.1/$LOCAL_PORT") >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        retries=$((retries + 1))
+    done
+    return 1
+}
+
 detect_remote_port() {
     local -a detect_cmd=(ssh -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8)
     [[ -n "$IDENTITY_FILE" ]] && detect_cmd+=(-i "$IDENTITY_FILE")
@@ -149,6 +161,7 @@ interactive_prompts() {
 validate_inputs() {
     [[ -n "$SSH_HOST" ]] || die "VPS host is required."
     [[ -n "$SSH_USER" ]] || die "SSH user is required."
+    command -v ssh >/dev/null 2>&1 || die "ssh command not found."
     is_valid_port "$SSH_PORT" || die "Invalid SSH port: $SSH_PORT"
     if [[ -n "$IDENTITY_FILE" && ! -f "$IDENTITY_FILE" ]]; then
         die "Identity file not found: $IDENTITY_FILE"
@@ -210,6 +223,9 @@ main() {
     fi
 
     start_tunnel
+    if ! wait_for_local_tunnel; then
+        die "SSH process started but local tunnel port $LOCAL_PORT did not become reachable."
+    fi
     info "Tunnel active. Open this URL: $url"
     open_browser "$url"
 

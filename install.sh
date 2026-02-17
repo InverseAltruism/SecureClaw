@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 unset TMOUT 2>/dev/null || true
 
 # SecureClaw Installer
@@ -53,11 +53,27 @@ die() {
     exit 1
 }
 
+CURRENT_PHASE="startup"
+
+set_phase() {
+    CURRENT_PHASE="$1"
+}
+
+handle_unexpected_error() {
+    local line_no="$1"
+    local exit_code="${2:-1}"
+    err "Unexpected failure in phase: $CURRENT_PHASE (line $line_no, exit $exit_code)."
+    err "Please rerun install and share this phase/line if it fails again."
+    exit "$exit_code"
+}
+
+trap 'handle_unexpected_error "$LINENO" "$?"' ERR
+
 readonly SECURECLAW_STATE_DIR="/etc/secureclaw"
 readonly SECURECLAW_INSTALL_STATE_FILE="$SECURECLAW_STATE_DIR/install.env"
 readonly SECURECLAW_PUBLIC_STATE_FILE="/etc/secureclaw-public.env"
 readonly OPENCLAW_REPO_URL="https://github.com/openclaw/openclaw.git"
-readonly OPENCLAW_DEFAULT_REF="c593709d252a1efe70a8ce40d40627a35b818e46"
+readonly OPENCLAW_DEFAULT_REF="stable"
 readonly SECURECLAW_UNINSTALL_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/uninstall.sh"
 readonly SECURECLAW_PANIC_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/panic.sh"
 readonly SECURECLAW_UPDATE_URL="https://raw.githubusercontent.com/InverseAltruism/SecureClaw/main/update.sh"
@@ -72,6 +88,20 @@ get_user_home() {
     user_home=$(getent passwd "$user_name" | awk -F: 'NR==1 {print $6}')
     [[ -n "$user_home" ]] || die "Unable to resolve home directory for user: $user_name"
     echo "$user_home"
+}
+
+run_user_systemctl() {
+    local user_name="$1"
+    shift
+    sudo -u "$user_name" \
+        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus" \
+        systemctl --user "$@"
+}
+
+user_systemd_available() {
+    local user_name="$1"
+    run_user_systemctl "$user_name" show-environment >/dev/null 2>&1
 }
 
 next_subid_start() {
@@ -113,6 +143,7 @@ SUBGID_ADDED_BY_SECURECLAW=$SUBGID_ADDED_BY_SECURECLAW
 SUBUID_RANGE=${SUBUID_RANGE:-}
 SUBGID_RANGE=${SUBGID_RANGE:-}
 OPENCLAW_REF_RESOLVED=${OPENCLAW_REF_RESOLVED:-unknown}
+CONTROL_UI_AUTH_MODE=${CONTROL_UI_AUTH_MODE:-strict}
 PACKAGES_INSTALLED_BY_SECURECLAW=${PACKAGES_INSTALLED_BY_SECURECLAW:-}
 DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW=$DOCKER_APT_SOURCE_ADDED_BY_SECURECLAW
 DOCKER_APT_KEY_ADDED_BY_SECURECLAW=$DOCKER_APT_KEY_ADDED_BY_SECURECLAW
@@ -125,6 +156,7 @@ BRIDGE_PORT=$BRIDGE_PORT
 CONTAINER_RUNTIME=$CONTAINER_RUNTIME
 SECURITY_TIER=$SECURITY_TIER
 INSTALL_PROFILE=$INSTALL_PROFILE
+CONTROL_UI_AUTH_MODE=${CONTROL_UI_AUTH_MODE:-strict}
 EOF
     chmod 644 "$SECURECLAW_PUBLIC_STATE_FILE"
 }
@@ -163,6 +195,29 @@ download_url_to_file() {
         return
     fi
     return 1
+}
+
+resolve_openclaw_default_ref() {
+    local requested_ref="$1"
+    if [[ "$requested_ref" != "stable" ]]; then
+        echo "$requested_ref"
+        return 0
+    fi
+
+    local latest_tag=""
+    if command -v curl >/dev/null 2>&1; then
+        latest_tag="$(curl -fsSL "https://api.github.com/repos/openclaw/openclaw/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    elif command -v wget >/dev/null 2>&1; then
+        latest_tag="$(wget -qO- "https://api.github.com/repos/openclaw/openclaw/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    fi
+
+    if [[ -n "$latest_tag" ]]; then
+        echo "$latest_tag"
+        return 0
+    fi
+
+    warn "Could not resolve latest stable OpenClaw release tag; falling back to main."
+    echo "main"
 }
 
 install_local_or_remote_script() {
@@ -204,6 +259,7 @@ DOCKER_APT_KEY_ADDED_BY_SECURECLAW=0
 OPENCLAW_REF_RESOLVED="unknown"
 INSTALL_PROFILE="quick"
 ARG_INSTALL_PROFILE=""
+CONTROL_UI_AUTH_MODE="strict"
 
 MENU_SELECTION=""
 
@@ -301,6 +357,31 @@ is_port_in_use() {
     ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found ? 0 : 1)}'
 }
 
+port_listener_summary() {
+    local port="$1"
+    if ! command -v ss >/dev/null 2>&1; then
+        return 0
+    fi
+    ss -ltnp "sport = :$port" 2>/dev/null | awk 'NR>1 {print $4 " " $6}'
+}
+
+find_next_free_port_pair() {
+    local start_port="$1"
+    local candidate="$start_port"
+    local bridge=0
+
+    while (( candidate <= 65533 )); do
+        bridge=$((candidate + 1))
+        if ! is_port_in_use "$candidate" && ! is_port_in_use "$bridge"; then
+            echo "$candidate:$bridge"
+            return 0
+        fi
+        ((candidate++))
+    done
+
+    return 1
+}
+
 is_valid_token() {
     local token="$1"
     [[ "$token" =~ ^[A-Fa-f0-9]{64}$ ]]
@@ -339,7 +420,7 @@ EOF
 # SYSTEM INFO & CONTAINER RUNTIME PROMPTS
 # ============================================================================
 prompt_system_info() {
-    section "Section 1/9: System Information"
+    section "Section 1/10: System Information"
 
     # Detect OS
     local os_name="Unknown"
@@ -403,21 +484,21 @@ prompt_system_info() {
 }
 
 prompt_container_runtime() {
-    section "Section 2/9: Container Runtime"
+    section "Section 2/10: Container Runtime"
     echo
     echo "Choose your container runtime:"
     echo
-    echo "  ${BOLD}1. Podman (rootless)${RESET} — ${GREEN}Recommended${RESET} for maximum security"
+    echo -e "  ${BOLD}1. Podman (rootless)${RESET} — ${GREEN}Recommended${RESET} for maximum security"
     dim "No daemon, no Docker socket to exploit, rootless by default."
     dim "Container runs as unprivileged UID — a compromise cannot reach root."
     dim "Requires: podman, uidmap, slirp4netns (installed automatically)"
     echo
-    echo "  ${BOLD}2. Docker (rootless)${RESET} — Strong security with Docker tooling"
+    echo -e "  ${BOLD}2. Docker (rootless)${RESET} — Strong security with Docker tooling"
     dim "No root daemon, user-namespace isolation like Podman."
     dim "Choose this if you prefer Docker CLI but want rootless security."
     dim "Requires: docker-ce, docker-ce-rootless-extras, uidmap, slirp4netns"
     echo
-    echo "  ${BOLD}3. Docker (standard + hardened)${RESET} — Standard Docker with hardening"
+    echo -e "  ${BOLD}3. Docker (standard + hardened)${RESET} — Standard Docker with hardening"
     dim "Uses the standard root Docker daemon, but the container itself is"
     dim "hardened with all security flags (cap-drop, no-new-privileges, etc.)."
     dim "Only choose this if rootless Docker/Podman is not available on your system."
@@ -453,19 +534,19 @@ prompt_container_runtime() {
 prompt_operation_mode() {
     section "Select Operation"
     echo
-    echo "  ${BOLD}1. Install SecureClaw${RESET}"
+    echo -e "  ${BOLD}1. Install SecureClaw${RESET}"
     dim "Set up OpenClaw with your selected runtime and security tier"
     echo
-    echo "  ${BOLD}2. Uninstall SecureClaw${RESET}"
+    echo -e "  ${BOLD}2. Uninstall SecureClaw${RESET}"
     dim "Fully revert SecureClaw artifacts, user setup, and host-level hardening"
     echo
-    echo "  ${BOLD}3. PANIC Stop (Emergency)${RESET}"
+    echo -e "  ${BOLD}3. PANIC Stop (Emergency)${RESET}"
     dim "Immediately stop OpenClaw services, containers, and related processes"
     echo
-    echo "  ${BOLD}4. Update Existing SecureClaw Install${RESET}"
+    echo -e "  ${BOLD}4. Update Existing SecureClaw Install${RESET}"
     dim "Rebuild OpenClaw image and restart your current SecureClaw deployment"
     echo
-    echo "  ${BOLD}5. Backup / Restore Agent Data${RESET}"
+    echo -e "  ${BOLD}5. Backup / Restore Agent Data${RESET}"
     dim "Create encrypted-safe backups for migration, rollback, and disaster recovery"
     echo
     menu_select \
@@ -508,11 +589,11 @@ prompt_operation_mode() {
 prompt_install_profile() {
     section "Installation Mode"
     echo
-    echo "  ${BOLD}1. Quick Secure Install${RESET} — ${GREEN}Recommended${RESET}"
+    echo -e "  ${BOLD}1. Quick Secure Install${RESET} — ${GREEN}Recommended${RESET}"
     dim "Best for non-technical users. Uses secure defaults and minimal prompts."
     dim "Defaults: Podman rootless, Balanced tier, systemd enabled."
     echo
-    echo "  ${BOLD}2. Advanced Guided Install${RESET}"
+    echo -e "  ${BOLD}2. Advanced Guided Install${RESET}"
     dim "Full control over runtime, security tier, paths, ports, and limits."
     echo
 
@@ -549,6 +630,7 @@ apply_quick_secure_defaults() {
     MEMORY_LIMIT="2g"
     CPU_LIMIT="2.0"
     PID_LIMIT=256
+    CONTROL_UI_AUTH_MODE="strict"
 
     GATEWAY_PORT=18789
     BRIDGE_PORT=$((GATEWAY_PORT + 1))
@@ -643,34 +725,38 @@ generate_token() {
 # ============================================================================
 discover_openclaw_repo() {
     local repo_path=""
-    local openclaw_ref="${ARG_OPENCLAW_REF:-${OPENCLAW_REF:-$OPENCLAW_DEFAULT_REF}}"
+    local requested_openclaw_ref="${ARG_OPENCLAW_REF:-${OPENCLAW_REF:-$OPENCLAW_DEFAULT_REF}}"
+    local openclaw_ref
+    openclaw_ref="$(resolve_openclaw_default_ref "$requested_openclaw_ref")"
 
     # Check OPENCLAW_REPO env var
     if [[ -n "${OPENCLAW_REPO:-}" && -d "$OPENCLAW_REPO" ]]; then
         repo_path="$OPENCLAW_REPO"
         info "Using OpenClaw repo from OPENCLAW_REPO: $repo_path" >&2
-        warn "Using local OpenClaw source; pinned ref enforcement is skipped for local repos." >&2
+        warn "Using local OpenClaw source; remote ref selection is skipped for local repos." >&2
     # Check for --openclaw-repo argument
     elif [[ -n "${ARG_OPENCLAW_REPO:-}" && -d "$ARG_OPENCLAW_REPO" ]]; then
         repo_path="$ARG_OPENCLAW_REPO"
         info "Using OpenClaw repo from argument: $repo_path" >&2
-        warn "Using local OpenClaw source; pinned ref enforcement is skipped for local repos." >&2
+        warn "Using local OpenClaw source; remote ref selection is skipped for local repos." >&2
     # Check sibling directory
     elif [[ -d "$(dirname "$0")/../openclaw" ]]; then
         repo_path="$(cd "$(dirname "$0")/../openclaw" && pwd)"
         info "Found OpenClaw repo in sibling directory: $repo_path" >&2
-        warn "Using local OpenClaw source; pinned ref enforcement is skipped for local repos." >&2
+        warn "Using local OpenClaw source; remote ref selection is skipped for local repos." >&2
     # Clone it
     else
-        warn "OpenClaw repository not found" >&2
-        info "Cloning pinned OpenClaw ref: $openclaw_ref" >&2
+        warn "No local OpenClaw source provided; cloning upstream OpenClaw repository." >&2
+        info "Using OpenClaw ref: $openclaw_ref (requested: $requested_openclaw_ref)" >&2
         repo_path=$(mktemp -d /tmp/openclaw-XXXXXX)
+        # mktemp creates 0700 by default; rootless build users must be able to traverse this path.
+        chmod 755 "$repo_path" || die "Failed to adjust temporary repository directory permissions"
         git clone --filter=blob:none --no-checkout "$OPENCLAW_REPO_URL" "$repo_path" >&2 || \
             die "Failed to clone OpenClaw repository"
         git -C "$repo_path" fetch --depth 1 origin "$openclaw_ref" >&2 || \
             die "Failed to fetch OpenClaw ref: $openclaw_ref"
         git -C "$repo_path" checkout --detach FETCH_HEAD >&2 || \
-            die "Failed to checkout pinned OpenClaw ref"
+            die "Failed to checkout requested OpenClaw ref"
         local resolved_ref
         resolved_ref=$(git -C "$repo_path" rev-parse HEAD)
         info "Resolved OpenClaw commit: $resolved_ref" >&2
@@ -694,24 +780,24 @@ discover_openclaw_repo() {
 # INTERACTIVE PROMPTS
 # ============================================================================
 prompt_security_level() {
-    section "Section 3/9: Security Level"
+    section "Section 3/10: Security Level"
     echo
     echo "Choose your security tier:"
     echo
-    echo "  ${BOLD}1. Standard${RESET} — Maximum compatibility, baseline isolation"
+    echo -e "  ${BOLD}1. Standard${RESET} — Maximum compatibility, baseline isolation"
     dim "Rootless container (or hardened Docker), token auth, localhost host-port exposure."
     dim "Best for: Development, troubleshooting, broad compatibility."
     echo
-    echo "  ${BOLD}2. Balanced${RESET} — Secure + full OpenClaw features ${GREEN}(recommended)${RESET}"
+    echo -e "  ${BOLD}2. Balanced${RESET} — Secure + full OpenClaw features ${GREEN}(recommended)${RESET}"
     dim "Read-only root filesystem, cap-drop, no-new-privileges, resource limits."
     dim "Keeps ~/.openclaw writable for channels, credentials, onboarding, and extensions."
     dim "Best for: Production where you want strong security without breaking OpenClaw features."
     echo
-    echo "  ${BOLD}3. Hardened (strict)${RESET} — Highest app-level restriction"
+    echo -e "  ${BOLD}3. Hardened (strict)${RESET} — Highest app-level restriction"
     dim "All Balanced controls plus workspace-only tool restrictions and read-only ~/.openclaw mount."
     dim "May limit OpenClaw features that need writes outside workspace (onboarding/channels/credentials)."
     echo
-    echo "  ${BOLD}4. Paranoid${RESET} — Maximum isolation"
+    echo -e "  ${BOLD}4. Paranoid${RESET} — Maximum isolation"
     dim "All Hardened (strict) features plus:"
     dim "  • Host egress firewall via nftables (blocks cloud metadata,"
     dim "    RFC1918 private networks, and lateral movement)"
@@ -756,7 +842,7 @@ prompt_security_level() {
 }
 
 prompt_install_dir() {
-    section "Section 4/9: Installation Directory"
+    section "Section 4/10: Installation Directory"
     echo
     read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Install directory:${RESET} ")" -r -i "/home/openclaw/.openclaw" -e INSTALL_DIR
     INSTALL_DIR=${INSTALL_DIR:-/home/openclaw/.openclaw}
@@ -769,7 +855,7 @@ prompt_install_dir() {
 }
 
 prompt_username() {
-    section "Section 5/9: System User"
+    section "Section 5/10: System User"
     echo
     while true; do
         read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}System username:${RESET} ")" -r -i "openclaw" -e SYSTEM_USER
@@ -783,7 +869,7 @@ prompt_username() {
 }
 
 prompt_ports() {
-    section "Section 6/9: Gateway Port"
+    section "Section 6/10: Gateway Port"
     echo
     while true; do
         read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Gateway port:${RESET} ")" -r -i "18789" -e GATEWAY_PORT
@@ -801,10 +887,58 @@ prompt_ports() {
 
         if is_port_in_use "$GATEWAY_PORT"; then
             warn "Port $GATEWAY_PORT is already in use."
+            local listener_lines=""
+            listener_lines="$(port_listener_summary "$GATEWAY_PORT" || true)"
+            if [[ -n "$listener_lines" ]]; then
+                dim "Current listener(s):"
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] || continue
+                    dim "  $line"
+                done <<< "$listener_lines"
+            fi
+            local suggested_pair=""
+            suggested_pair="$(find_next_free_port_pair "$GATEWAY_PORT" || true)"
+            if [[ -n "$suggested_pair" ]]; then
+                local suggested_gateway="${suggested_pair%%:*}"
+                local suggested_bridge="${suggested_pair##*:}"
+                read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Use next free pair $suggested_gateway/$suggested_bridge? [Y/n]:${RESET} ")" -r USE_SUGGESTED
+                USE_SUGGESTED=${USE_SUGGESTED:-Y}
+                if [[ "$USE_SUGGESTED" =~ ^[Yy]$ ]]; then
+                    GATEWAY_PORT="$suggested_gateway"
+                    BRIDGE_PORT="$suggested_bridge"
+                    info "Gateway port: $GATEWAY_PORT"
+                    info "Bridge port: $BRIDGE_PORT"
+                    break
+                fi
+            fi
             continue
         fi
         if is_port_in_use "$BRIDGE_PORT"; then
             warn "Bridge port $BRIDGE_PORT is already in use."
+            local listener_lines=""
+            listener_lines="$(port_listener_summary "$BRIDGE_PORT" || true)"
+            if [[ -n "$listener_lines" ]]; then
+                dim "Current listener(s):"
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] || continue
+                    dim "  $line"
+                done <<< "$listener_lines"
+            fi
+            local suggested_pair=""
+            suggested_pair="$(find_next_free_port_pair "$GATEWAY_PORT" || true)"
+            if [[ -n "$suggested_pair" ]]; then
+                local suggested_gateway="${suggested_pair%%:*}"
+                local suggested_bridge="${suggested_pair##*:}"
+                read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Use next free pair $suggested_gateway/$suggested_bridge? [Y/n]:${RESET} ")" -r USE_SUGGESTED
+                USE_SUGGESTED=${USE_SUGGESTED:-Y}
+                if [[ "$USE_SUGGESTED" =~ ^[Yy]$ ]]; then
+                    GATEWAY_PORT="$suggested_gateway"
+                    BRIDGE_PORT="$suggested_bridge"
+                    info "Gateway port: $GATEWAY_PORT"
+                    info "Bridge port: $BRIDGE_PORT"
+                    break
+                fi
+            fi
             continue
         fi
 
@@ -830,8 +964,44 @@ prompt_token() {
     done
 }
 
+prompt_control_ui_auth_mode() {
+    section "Section 7/10: Control UI Access Mode"
+    echo
+    echo "Choose how dashboard/control UI access is handled:"
+    echo
+    echo -e "  ${BOLD}A. Strict pairing (recommended)${RESET}"
+    dim "Secure default: token auth + device/client pairing approvals."
+    dim "Best for production and remote access over SSH tunnel/Tailscale."
+    echo
+    echo -e "  ${BOLD}B. Compatibility mode (allow insecure UI auth)${RESET}"
+    dim "Fallback for environments where pairing flow cannot be completed."
+    dim "Use only behind SSH tunnel/Tailscale; do not expose gateway directly."
+    warn "Compatibility mode weakens UI authentication protections."
+    echo
+    menu_select \
+        "Select control UI access mode" \
+        "A" \
+        "A|Strict pairing (recommended)" \
+        "B|Compatibility (allowInsecureAuth)"
+
+    case "${MENU_SELECTION:-A}" in
+        A|a)
+            CONTROL_UI_AUTH_MODE="strict"
+            info "Selected: Strict pairing (recommended)"
+            ;;
+        B|b)
+            CONTROL_UI_AUTH_MODE="compatibility"
+            warn "Selected: Compatibility mode (allowInsecureAuth enabled)"
+            ;;
+        *)
+            CONTROL_UI_AUTH_MODE="strict"
+            info "Selected: Strict pairing (default)"
+            ;;
+    esac
+}
+
 prompt_api_keys() {
-    section "Section 7/9: API Keys (optional)"
+    section "Section 8/10: API Keys (optional)"
     echo
     dim "Configure API keys for the LLM providers you plan to use."
     dim "Keys are stored in a protected .env file (mode 600)."
@@ -913,17 +1083,17 @@ prompt_api_keys() {
     done
 
     local key_count=0
-    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && ((key_count++))
-    [[ -n "${OPENAI_API_KEY:-}" ]] && ((key_count++))
-    [[ -n "${OPENROUTER_API_KEY:-}" ]] && ((key_count++))
-    [[ -n "${GEMINI_API_KEY:-}" ]] && ((key_count++))
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && key_count=$((key_count + 1))
+    [[ -n "${OPENAI_API_KEY:-}" ]] && key_count=$((key_count + 1))
+    [[ -n "${OPENROUTER_API_KEY:-}" ]] && key_count=$((key_count + 1))
+    [[ -n "${GEMINI_API_KEY:-}" ]] && key_count=$((key_count + 1))
 
     echo
     info "Configured $key_count API key(s)"
 }
 
 prompt_systemd() {
-    section "Section 8/9: Systemd Auto-Start"
+    section "Section 9/10: Systemd Auto-Start"
     echo
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
         read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Enable systemd Quadlet for auto-start? [Y/n]:${RESET} ")" -r ENABLE_SYSTEMD
@@ -952,7 +1122,7 @@ prompt_resource_limits() {
         return
     fi
 
-    section "Section 9/9: Resource Limits"
+    section "Section 10/10: Resource Limits"
     echo
     while true; do
         read -p "$(echo -e "${GREEN}?${RESET} ${BOLD}Memory limit:${RESET} ")" -r -i "2g" -e MEMORY_LIMIT
@@ -989,13 +1159,14 @@ show_summary() {
     echo -e "${BOLD}System User:${RESET}         $SYSTEM_USER"
     echo -e "${BOLD}Gateway Port:${RESET}        $GATEWAY_PORT"
     echo -e "${BOLD}Bridge Port:${RESET}         $BRIDGE_PORT"
+    echo -e "${BOLD}Control UI Mode:${RESET}     $CONTROL_UI_AUTH_MODE"
     echo -e "${BOLD}Gateway Token:${RESET}       ${GATEWAY_TOKEN:0:16}...${GATEWAY_TOKEN: -8}"
     
     local key_count=0
-    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && ((key_count++))
-    [[ -n "${OPENAI_API_KEY:-}" ]] && ((key_count++))
-    [[ -n "${OPENROUTER_API_KEY:-}" ]] && ((key_count++))
-    [[ -n "${GEMINI_API_KEY:-}" ]] && ((key_count++))
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && key_count=$((key_count + 1))
+    [[ -n "${OPENAI_API_KEY:-}" ]] && key_count=$((key_count + 1))
+    [[ -n "${OPENROUTER_API_KEY:-}" ]] && key_count=$((key_count + 1))
+    [[ -n "${GEMINI_API_KEY:-}" ]] && key_count=$((key_count + 1))
     echo -e "${BOLD}API Keys:${RESET}            $key_count configured"
     
     if [[ $ENABLE_SYSTEMD -eq 1 ]]; then
@@ -1016,6 +1187,10 @@ show_summary() {
     elif [[ "$SECURITY_TIER" == "paranoid" ]]; then
         warn "Paranoid tier will modify host firewall (nftables) and install audit monitoring"
         warn "Paranoid tier may impact browser/nodes/channels depending on network and sandbox policies"
+    fi
+    if [[ "$CONTROL_UI_AUTH_MODE" == "compatibility" ]]; then
+        warn "Compatibility mode enables controlUi.allowInsecureAuth for easier UI access."
+        warn "Use only through SSH tunnel/Tailscale and rotate gateway tokens regularly."
     fi
     
     echo
@@ -1186,6 +1361,14 @@ layer2_container_image() {
     
     # Discover OpenClaw repo
     OPENCLAW_PATH=$(discover_openclaw_repo)
+
+    # Ensure rootless runtime user can read cloned source.
+    if [[ "$CONTAINER_RUNTIME" == "podman" || "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        if ! sudo -u "$SYSTEM_USER" test -r "$OPENCLAW_PATH/Dockerfile" 2>/dev/null; then
+            info "Adjusting source tree permissions for rootless build user..."
+            chmod -R a+rX "$OPENCLAW_PATH" || die "Failed to make OpenClaw source readable for $SYSTEM_USER"
+        fi
+    fi
     
     info "Building OpenClaw image from $OPENCLAW_PATH..."
     
@@ -1193,7 +1376,7 @@ layer2_container_image() {
         # Build image in the service user's rootless store.
         sudo -u "$SYSTEM_USER" \
             XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-            podman build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
+            podman --log-level=error build -t openclaw:local -f "$OPENCLAW_PATH/Dockerfile" "$OPENCLAW_PATH" || \
             die "Failed to build container image"
     elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
         # Build as user using rootless docker
@@ -1236,34 +1419,46 @@ layer6_configuration() {
     CONFIG_DIR="$INSTALL_DIR"
     WORKSPACE_DIR="$INSTALL_DIR/workspace"
     
+    # Ensure ownership before writing files (important on retries/reinstalls).
+    mkdir -p "$CONFIG_DIR" || die "Failed to create config directory: $CONFIG_DIR"
+    chown -R "$SYSTEM_USER:$SYSTEM_USER" "$CONFIG_DIR" || die "Failed to set ownership on $CONFIG_DIR"
+
     # Create directories as user
     info "Creating directory structure..."
-    sudo -u "$SYSTEM_USER" mkdir -p "$CONFIG_DIR/canvas"
-    sudo -u "$SYSTEM_USER" mkdir -p "$CONFIG_DIR/cron"
-    sudo -u "$SYSTEM_USER" mkdir -p "$WORKSPACE_DIR"
-    sudo -u "$SYSTEM_USER" chmod 700 "$CONFIG_DIR"
-    sudo -u "$SYSTEM_USER" chmod 700 "$WORKSPACE_DIR"
+    sudo -u "$SYSTEM_USER" mkdir -p "$CONFIG_DIR/canvas" || die "Failed to create $CONFIG_DIR/canvas"
+    sudo -u "$SYSTEM_USER" mkdir -p "$CONFIG_DIR/cron" || die "Failed to create $CONFIG_DIR/cron"
+    sudo -u "$SYSTEM_USER" mkdir -p "$WORKSPACE_DIR" || die "Failed to create workspace directory: $WORKSPACE_DIR"
+    sudo -u "$SYSTEM_USER" chmod 700 "$CONFIG_DIR" || die "Failed to set permissions on $CONFIG_DIR"
+    sudo -u "$SYSTEM_USER" chmod 700 "$WORKSPACE_DIR" || die "Failed to set permissions on $WORKSPACE_DIR"
     
     # Write .env file
     info "Writing .env file..."
     local env_file="$CONFIG_DIR/.env"
+    local env_tmp
+    env_tmp=$(mktemp /tmp/secureclaw-env-XXXXXX)
     {
         echo "OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN"
         [[ -n "${ANTHROPIC_API_KEY:-}" ]] && echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
         [[ -n "${OPENAI_API_KEY:-}" ]] && echo "OPENAI_API_KEY=$OPENAI_API_KEY"
         [[ -n "${OPENROUTER_API_KEY:-}" ]] && echo "OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
         [[ -n "${GEMINI_API_KEY:-}" ]] && echo "GEMINI_API_KEY=$GEMINI_API_KEY"
-    } | sudo -u "$SYSTEM_USER" tee "$env_file" > /dev/null
-    
-    sudo -u "$SYSTEM_USER" chmod 600 "$env_file"
+    } > "$env_tmp"
+    install -o "$SYSTEM_USER" -g "$SYSTEM_USER" -m 600 "$env_tmp" "$env_file" || die "Failed to write .env at $env_file"
+    rm -f "$env_tmp"
     
     # Write openclaw.json
     info "Writing openclaw.json..."
     local config_file="$CONFIG_DIR/openclaw.json"
     
+    local config_tmp
+    config_tmp=$(mktemp /tmp/secureclaw-config-XXXXXX)
+    local control_ui_allow_insecure="false"
+    if [[ "$CONTROL_UI_AUTH_MODE" == "compatibility" ]]; then
+        control_ui_allow_insecure="true"
+    fi
     if [[ "$SECURITY_TIER" == "standard" ]]; then
         # Standard tier - compatibility-first
-        cat > "$config_file" << EOF
+        cat > "$config_tmp" << EOF
 {
   "gateway": {
     "mode": "local",
@@ -1272,12 +1467,15 @@ layer6_configuration() {
     "auth": {
       "mode": "token"
     }
+  },
+  "controlUi": {
+    "allowInsecureAuth": $control_ui_allow_insecure
   }
 }
 EOF
     elif [[ "$SECURITY_TIER" == "balanced" ]]; then
         # Balanced tier - secure defaults with full feature compatibility
-        cat > "$config_file" << EOF
+        cat > "$config_tmp" << EOF
 {
   "gateway": {
     "mode": "local",
@@ -1286,12 +1484,15 @@ EOF
     "auth": {
       "mode": "token"
     }
+  },
+  "controlUi": {
+    "allowInsecureAuth": $control_ui_allow_insecure
   }
 }
 EOF
     elif [[ "$SECURITY_TIER" == "hardened" ]]; then
         # Hardened strict tier - lan binding + restrictions
-        cat > "$config_file" << EOF
+        cat > "$config_tmp" << EOF
 {
   "gateway": {
     "mode": "local",
@@ -1300,6 +1501,9 @@ EOF
     "auth": {
       "mode": "token"
     }
+  },
+  "controlUi": {
+    "allowInsecureAuth": $control_ui_allow_insecure
   },
   "tools": {
     "exec": {
@@ -1318,7 +1522,7 @@ EOF
 EOF
     else
         # Paranoid tier - all hardened + sandboxing
-        cat > "$config_file" << EOF
+        cat > "$config_tmp" << EOF
 {
   "gateway": {
     "mode": "local",
@@ -1327,6 +1531,9 @@ EOF
     "auth": {
       "mode": "token"
     }
+  },
+  "controlUi": {
+    "allowInsecureAuth": $control_ui_allow_insecure
   },
   "tools": {
     "exec": {
@@ -1360,9 +1567,9 @@ EOF
 }
 EOF
     fi
-    
-    chown "$SYSTEM_USER:$SYSTEM_USER" "$config_file"
-    chmod 600 "$config_file"
+
+    install -o "$SYSTEM_USER" -g "$SYSTEM_USER" -m 600 "$config_tmp" "$config_file" || die "Failed to write config file: $config_file"
+    rm -f "$config_tmp"
     
     info "Layer 6 complete"
 }
@@ -1433,9 +1640,8 @@ build_podman_args() {
         BIND_MODE="lan"
     fi
     
-    # Image and command
+    # Image (use upstream default command for version compatibility)
     PODMAN_ARGS+=(openclaw:local)
-    PODMAN_ARGS+=(node dist/index.js gateway --bind "$BIND_MODE" --port "$GATEWAY_PORT")
 }
 
 build_docker_args() {
@@ -1504,9 +1710,8 @@ build_docker_args() {
         BIND_MODE="lan"
     fi
     
-    # Image and command
+    # Image (use upstream default command for version compatibility)
     DOCKER_ARGS+=(openclaw:local)
-    DOCKER_ARGS+=(node dist/index.js gateway --bind "$BIND_MODE" --port "$GATEWAY_PORT")
 }
 
 layer3_container_hardening() {
@@ -1675,6 +1880,15 @@ layer7_launch() {
     else
         runtime_cmd="docker"
     fi
+
+    # Proactively detect whether user systemd is reachable for rootless runtimes.
+    if [[ $ENABLE_SYSTEMD -eq 1 && "$CONTAINER_RUNTIME" != "docker" ]]; then
+        if ! user_systemd_available "$SYSTEM_USER"; then
+            warn "User systemd is not reachable for $SYSTEM_USER on this host/session."
+            warn "Proceeding with direct launch (no auto-start service for this run)."
+            ENABLE_SYSTEMD=0
+        fi
+    fi
     
     # Always create launch script
     info "Creating launch script ($runtime_cmd)..."
@@ -1788,12 +2002,7 @@ Network=slirp4netns:allow_host_loopback=false
 EOF
             fi
             
-            # Add command
             cat >> "$quadlet_file" << EOF
-
-# Command
-Exec=node dist/index.js gateway --bind $BIND_MODE --port $GATEWAY_PORT
-
 [Service]
 Restart=always
 TimeoutStartSec=300
@@ -1806,10 +2015,20 @@ EOF
             
             # Reload and enable
             info "Enabling and starting systemd service..."
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user daemon-reload
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user enable openclaw.service >/dev/null 2>&1
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user start openclaw.service || \
-                die "Failed to start service"
+            run_user_systemctl "$SYSTEM_USER" daemon-reload || die "Failed to reload user systemd daemon"
+            if ! run_user_systemctl "$SYSTEM_USER" cat openclaw.service >/dev/null 2>&1; then
+                warn "Quadlet generator did not expose openclaw.service on this host."
+                warn "Falling back to direct launch (service auto-start disabled for now)."
+                ENABLE_SYSTEMD=0
+            else
+                if ! run_user_systemctl "$SYSTEM_USER" enable openclaw.service; then
+                    warn "Could not enable openclaw.service in user systemd; falling back to direct launch."
+                    ENABLE_SYSTEMD=0
+                elif ! run_user_systemctl "$SYSTEM_USER" start openclaw.service; then
+                    warn "Could not start openclaw.service in user systemd; falling back to direct launch."
+                    ENABLE_SYSTEMD=0
+                fi
+            fi
         
         elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
             # Docker rootless systemd unit (user-level)
@@ -1847,10 +2066,14 @@ EOF
             chown "$SYSTEM_USER:$SYSTEM_USER" "$unit_file"
             
             info "Enabling and starting systemd service..."
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user daemon-reload
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user enable openclaw.service >/dev/null 2>&1
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user start openclaw.service || \
-                die "Failed to start service"
+            run_user_systemctl "$SYSTEM_USER" daemon-reload || die "Failed to reload user systemd daemon"
+            if ! run_user_systemctl "$SYSTEM_USER" enable openclaw.service; then
+                warn "Could not enable user systemd service; falling back to direct launch."
+                ENABLE_SYSTEMD=0
+            elif ! run_user_systemctl "$SYSTEM_USER" start openclaw.service; then
+                warn "Could not start user systemd service; falling back to direct launch."
+                ENABLE_SYSTEMD=0
+            fi
         
         else
             # Standard Docker systemd unit (system-level)
@@ -1888,15 +2111,30 @@ EOF
             systemctl start openclaw.service || \
                 die "Failed to start service"
         fi
-    else
+    fi
+
+    if [[ $ENABLE_SYSTEMD -eq 0 ]]; then
         # Launch directly
         info "Starting container..."
+        if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+            info "Rootless Podman first launch can take a few minutes while user namespace mappings are prepared."
+        fi
         cd "$USER_HOME"
         if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
             bash "$launch_script" || die "Failed to start container"
         else
-            sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" bash "$launch_script" || \
-                die "Failed to start container"
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 900 sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" bash "$launch_script" || {
+                    local launch_exit=$?
+                    if [[ "$launch_exit" -eq 124 ]]; then
+                        die "Container start timed out after 15 minutes. Check for stuck rootless mapping with: ps -ef | rg storage-chown-by-maps"
+                    fi
+                    die "Failed to start container"
+                }
+            else
+                sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" bash "$launch_script" || \
+                    die "Failed to start container"
+            fi
         fi
     fi
     
@@ -1980,6 +2218,13 @@ show_final_summary() {
     echo -e "${BOLD}Container Runtime:${RESET}"
     echo -e "  $CONTAINER_RUNTIME"
     echo
+    echo -e "${BOLD}Control UI Access Mode:${RESET}"
+    if [[ "$CONTROL_UI_AUTH_MODE" == "strict" ]]; then
+        echo -e "  Strict pairing (recommended)"
+    else
+        echo -e "  Compatibility (allowInsecureAuth enabled)"
+    fi
+    echo
     echo -e "${BOLD}Gateway Token:${RESET}"
     echo -e "  ${GATEWAY_TOKEN:0:16}...${GATEWAY_TOKEN: -8}"
     echo
@@ -1995,7 +2240,7 @@ show_final_summary() {
     echo -e "    bash connect-openclaw-macos.sh"
     echo -e "  Windows (PowerShell):"
     echo -e "    iwr -UseBasicParsing $SECURECLAW_CONNECT_WINDOWS_URL -OutFile connect-openclaw-windows.ps1"
-    echo -e "    powershell -ExecutionPolicy Bypass -File .\\connect-openclaw-windows.ps1"
+    echo "    powershell -ExecutionPolicy Bypass -File .\\connect-openclaw-windows.ps1"
     echo
     echo -e "${BOLD}View Logs:${RESET}"
     if [[ $ENABLE_SYSTEMD -eq 1 ]]; then
@@ -2060,6 +2305,35 @@ show_final_summary() {
     echo -e "  API Keys: $CONFIG_DIR/.env"
     echo -e "  Workspace: $WORKSPACE_DIR"
     echo
+    local pair_list_cmd=""
+    local pair_approve_cmd=""
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        pair_list_cmd="sudo -u $SYSTEM_USER XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR podman exec openclaw sh -lc 'if [ -f openclaw.mjs ]; then node openclaw.mjs devices list --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; else node dist/index.js devices list --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; fi'"
+        pair_approve_cmd="sudo -u $SYSTEM_USER XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR podman exec openclaw sh -lc 'if [ -f openclaw.mjs ]; then node openclaw.mjs devices approve <device-id> --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; else node dist/index.js devices approve <device-id> --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; fi'"
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        pair_list_cmd="sudo -u $SYSTEM_USER XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock docker exec openclaw sh -lc 'if [ -f openclaw.mjs ]; then node openclaw.mjs devices list --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; else node dist/index.js devices list --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; fi'"
+        pair_approve_cmd="sudo -u $SYSTEM_USER XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock docker exec openclaw sh -lc 'if [ -f openclaw.mjs ]; then node openclaw.mjs devices approve <device-id> --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; else node dist/index.js devices approve <device-id> --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; fi'"
+    else
+        pair_list_cmd="docker exec openclaw sh -lc 'if [ -f openclaw.mjs ]; then node openclaw.mjs devices list --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; else node dist/index.js devices list --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; fi'"
+        pair_approve_cmd="docker exec openclaw sh -lc 'if [ -f openclaw.mjs ]; then node openclaw.mjs devices approve <device-id> --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; else node dist/index.js devices approve <device-id> --url ws://127.0.0.1:$GATEWAY_PORT --token \"\$OPENCLAW_GATEWAY_TOKEN\"; fi'"
+    fi
+
+    echo -e "${BOLD}Post-Install Access Checklist:${RESET}"
+    if [[ "$CONTROL_UI_AUTH_MODE" == "strict" ]]; then
+        echo -e "  1. Open dashboard: http://localhost:$GATEWAY_PORT"
+        echo -e "  2. Enter your gateway token"
+        echo -e "  3. If you see pairing required (1008), run:"
+        echo -e "     $pair_list_cmd"
+        echo -e "     $pair_approve_cmd"
+        echo -e "  4. Reconnect dashboard after approval"
+    else
+        echo -e "  1. Open dashboard: http://localhost:$GATEWAY_PORT"
+        echo -e "  2. Enter your gateway token"
+        echo -e "  3. Compatibility mode is enabled (allowInsecureAuth=true)"
+        echo -e "  4. Keep gateway behind SSH tunnel/Tailscale only"
+        echo -e "  5. Rotate OPENCLAW_GATEWAY_TOKEN regularly"
+    fi
+    echo
     echo -e "${BOLD}Active Security Layers (${SECURITY_TIER} tier, ${CONTAINER_RUNTIME} runtime):${RESET}"
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
         echo -e "  ✅ Rootless Podman"
@@ -2099,6 +2373,9 @@ show_final_summary() {
     echo -e "  • Set spending limits on all LLM API accounts"
     echo -e "  • Use dedicated API keys (don't reuse from other projects)"
     echo -e "  • Monitor usage regularly for anomalies"
+    if [[ "$CONTROL_UI_AUTH_MODE" == "compatibility" ]]; then
+        echo -e "  • Compatibility mode weakens UI auth; do not expose gateway publicly"
+    fi
     
     if [[ "$SECURITY_TIER" == "paranoid" ]]; then
         echo
@@ -2219,6 +2496,7 @@ backup_openclaw() {
 # MAIN
 # ============================================================================
 main() {
+    set_phase "startup"
     show_banner
     
     # Parse command line arguments
@@ -2249,7 +2527,9 @@ main() {
         esac
     done
 
+    set_phase "preflight checks"
     preflight_checks
+    set_phase "operation selection"
     prompt_operation_mode
     if [[ "$OPERATION_MODE" == "uninstall" ]]; then
         uninstall_openclaw
@@ -2268,39 +2548,66 @@ main() {
         exit 0
     fi
 
+    set_phase "install profile selection"
     prompt_install_profile
 
     # Interactive prompts
+    set_phase "system information prompt"
     prompt_system_info
     if [[ "$INSTALL_PROFILE" == "quick" ]]; then
+        set_phase "quick defaults"
         apply_quick_secure_defaults
+        set_phase "control ui auth mode prompt"
+        prompt_control_ui_auth_mode
     else
+        set_phase "runtime prompt"
         prompt_container_runtime
+        set_phase "security tier prompt"
         prompt_security_level
+        set_phase "install directory prompt"
         prompt_install_dir
+        set_phase "system user prompt"
         prompt_username
+        set_phase "port prompt"
         prompt_ports
+        set_phase "token prompt"
         prompt_token
+        set_phase "control ui auth mode prompt"
+        prompt_control_ui_auth_mode
+        set_phase "api keys prompt"
         prompt_api_keys
+        set_phase "systemd prompt"
         prompt_systemd
+        set_phase "resource limits prompt"
         prompt_resource_limits
     fi
     
     # Review and confirm
+    set_phase "configuration summary"
     show_summary
     
     # Execute installation layers
+    set_phase "layer1 system setup"
     layer1_system_setup
+    set_phase "layer2 container image build"
     layer2_container_image
+    set_phase "layer6 configuration"
     layer6_configuration
+    set_phase "layer3 container hardening"
     layer3_container_hardening
+    set_phase "layer4 firewall"
     layer4_firewall
+    set_phase "layer5 monitoring"
     layer5_monitoring
+    set_phase "layer7 launch"
     layer7_launch
+    set_phase "layer8 operational commands"
     layer8_install_operational_commands
+    set_phase "writing install manifest"
     write_install_manifest
     
     # Show final summary
+    set_phase "final summary"
     show_final_summary
 }
 
