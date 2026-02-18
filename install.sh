@@ -1385,12 +1385,7 @@ layer2_container_image() {
         fi
     fi
     
-    # Build args: install headless browser for Standard/Balanced tiers (full feature parity)
     local build_args=()
-    if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
-        info "Including headless browser and media support for full feature parity..."
-        build_args+=(--build-arg OPENCLAW_INSTALL_BROWSER=1)
-    fi
 
     info "Building OpenClaw image from $OPENCLAW_PATH..."
 
@@ -1471,7 +1466,7 @@ layer6_configuration() {
     # Write openclaw.json
     info "Writing openclaw.json..."
     local config_file="$CONFIG_DIR/openclaw.json"
-    
+
     local config_tmp
     config_tmp=$(mktemp /tmp/secureclaw-config-XXXXXX)
     local control_ui_allow_insecure="false"
@@ -1510,8 +1505,7 @@ layer6_configuration() {
     "lastRunMode": "local"
   },
   "browser": {
-    "headless": true,
-    "noSandbox": true
+    "headless": true
   }
 }
 EOF
@@ -1543,8 +1537,7 @@ EOF
     "lastRunMode": "local"
   },
   "browser": {
-    "headless": true,
-    "noSandbox": true
+    "headless": true
   }
 }
 EOF
@@ -1648,8 +1641,147 @@ EOF
 
     install -o "$SYSTEM_USER" -g "$SYSTEM_USER" -m 600 "$config_tmp" "$config_file" || die "Failed to write config file: $config_file"
     rm -f "$config_tmp"
-    
+
+    # Inject model object via python3 (avoids heredoc quoting issues).
+    # Per docs: agents.defaults.model is an object with "primary" field,
+    # using "provider/model" format (e.g. "anthropic/claude-sonnet-4-5").
+    if command -v python3 >/dev/null 2>&1; then
+        local model_primary=""
+        if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+            model_primary="anthropic/claude-sonnet-4-5"
+        elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+            model_primary="anthropic/claude-sonnet-4-5"
+        elif [[ -n "${OPENAI_API_KEY:-}" ]]; then
+            model_primary="openai/gpt-4o"
+        elif [[ -n "${GEMINI_API_KEY:-}" ]]; then
+            model_primary="gemini/gemini-2.0-flash"
+        fi
+        if [[ -n "$model_primary" ]]; then
+            python3 << PYEOF
+import json
+with open("$config_file", "r") as f:
+    c = json.load(f)
+c.setdefault("agents", {}).setdefault("defaults", {})["model"] = {
+    "primary": "$model_primary"
+}
+with open("$config_file", "w") as f:
+    json.dump(c, f, indent=2)
+    f.write("\n")
+PYEOF
+            chown "$SYSTEM_USER:$SYSTEM_USER" "$config_file"
+            chmod 600 "$config_file"
+            info "Set default model: $model_primary"
+        else
+            warn "No API keys configured — no default model set."
+        fi
+    fi
+
     info "Layer 6 complete"
+}
+
+# ============================================================================
+# LAYER 6.5: PRE-START STATE INITIALIZATION
+# ============================================================================
+run_oneshot_container() {
+    # Run a one-shot (--rm) container for pre-start tasks like browser install.
+    # Always mounts config as :rw. Container is discarded after the command.
+    local cmd="$1"
+    if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            podman run --rm --init --userns=keep-id --user "$USER_UID:$USER_GID" \
+            -e HOME=/home/node -e TERM=xterm-256color \
+            --env-file "$CONFIG_DIR/.env" \
+            -v "$CONFIG_DIR:/home/node/.openclaw:rw" \
+            -v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw" \
+            openclaw:local sh -lc "$cmd"
+    elif [[ "$CONTAINER_RUNTIME" == "docker-rootless" ]]; then
+        sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock" \
+            docker run --rm --init \
+            -e HOME=/home/node -e TERM=xterm-256color \
+            --env-file "$CONFIG_DIR/.env" \
+            -v "$CONFIG_DIR:/home/node/.openclaw:rw" \
+            -v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw" \
+            openclaw:local sh -lc "$cmd"
+    else
+        docker run --rm --init \
+            -e HOME=/home/node -e TERM=xterm-256color \
+            --env-file "$CONFIG_DIR/.env" \
+            -v "$CONFIG_DIR:/home/node/.openclaw:rw" \
+            -v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw" \
+            openclaw:local sh -lc "$cmd"
+    fi
+}
+
+layer6_5_init_state() {
+    section "Layer 6.5: State Initialization"
+
+    # Create directories that OpenClaw expects (per openclaw doctor output).
+    # Without these the gateway may crash or behave erratically.
+    info "Creating required state directories..."
+    sudo -u "$SYSTEM_USER" mkdir -p "$CONFIG_DIR/agents/main/sessions" || warn "Could not create sessions dir"
+    sudo -u "$SYSTEM_USER" mkdir -p "$CONFIG_DIR/credentials" || warn "Could not create credentials dir"
+
+    # Install Playwright browser binaries for channel support (WhatsApp Web, etc.).
+    # The upstream Dockerfile does NOT bake browsers into the image, so we install
+    # them into the persistent config directory and point PLAYWRIGHT_BROWSERS_PATH there.
+    # This survives container restarts and works with read-only root filesystems.
+    if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
+        info "Installing Playwright Chromium for channel support (WhatsApp Web, etc.)..."
+        sudo -u "$SYSTEM_USER" mkdir -p "$CONFIG_DIR/.browsers" || warn "Could not create .browsers dir"
+
+        # Use the exact command from upstream Docker docs:
+        #   node /app/node_modules/playwright-core/cli.js install chromium
+        local browser_cmd="PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers node /app/node_modules/playwright-core/cli.js install chromium 2>&1"
+        if run_oneshot_container "$browser_cmd"; then
+            info "Playwright Chromium installed successfully"
+        else
+            warn "Playwright browser install failed (non-fatal)."
+            warn "WhatsApp Web and other browser-dependent channels may not work."
+            warn "You can install manually later inside the running container:"
+            warn "  podman exec openclaw sh -c 'PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers node /app/node_modules/playwright-core/cli.js install chromium'"
+        fi
+    fi
+
+    # ── Onboard ───────────────────────────────────────────────────────────────
+    # Run "openclaw onboard --non-interactive" in a one-shot container.
+    # This mirrors the upstream Docker flow (build → onboard → start gateway)
+    # and initialises:
+    #   • Auth profiles for the detected model provider
+    #   • Workspace bootstrap files (AGENTS.md, SOUL.md, etc.)
+    #   • Channel subsystem
+    #   • Skill system
+    # Config changes are written to the mounted openclaw.json before the
+    # gateway ever reads it, so there is no file-watcher restart concern.
+    local auth_choice=""
+    if [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${OPENAI_API_KEY:-}" || -n "${OPENROUTER_API_KEY:-}" ]]; then
+        auth_choice="apiKey"
+    elif [[ -n "${GEMINI_API_KEY:-}" ]]; then
+        auth_choice="gemini-api-key"
+    fi
+
+    if [[ -n "$auth_choice" ]]; then
+        info "Running OpenClaw onboard (non-interactive, auth=$auth_choice)..."
+        local onboard_cmd="openclaw onboard --non-interactive --mode local"
+        onboard_cmd+=" --gateway-port $GATEWAY_PORT --gateway-bind lan"
+        onboard_cmd+=" --auth-choice $auth_choice"
+        onboard_cmd+=" --skip-daemon --skip-health --skip-ui"
+        onboard_cmd+=" --workspace /home/node/.openclaw/workspace"
+        if run_oneshot_container "$onboard_cmd"; then
+            info "Onboard completed successfully"
+            # Re-apply file permissions (onboard may have created new files)
+            chown -R "$SYSTEM_USER:$SYSTEM_USER" "$CONFIG_DIR" 2>/dev/null || true
+            chmod 600 "$CONFIG_DIR/openclaw.json" 2>/dev/null || true
+        else
+            warn "Onboard returned non-zero exit (some features may need manual setup)."
+            warn "You can run onboard later: podman exec openclaw openclaw onboard"
+        fi
+    else
+        warn "No API keys configured — skipping onboard."
+        warn "Chat will not work until you configure at least one model provider."
+    fi
+
+    info "Layer 6.5 complete"
 }
 
 # ============================================================================
@@ -1676,6 +1808,10 @@ build_podman_args() {
     # Tier-specific hardening
     if [[ "$SECURITY_TIER" == "standard" ]]; then
         # Standard: Compatibility-first, writable config/workspace.
+        # Chromium (Playwright) needs adequate shared memory for rendering.
+        PODMAN_ARGS+=(--shm-size=256m)
+        # Browser binaries are installed to the persistent config dir (layer6.5).
+        PODMAN_ARGS+=(-e PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers)
         PODMAN_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         PODMAN_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
     elif [[ "$SECURITY_TIER" == "balanced" ]]; then
@@ -1684,10 +1820,11 @@ build_podman_args() {
         # /tmp needs exec for Chromium child processes and ffmpeg
         # shellcheck disable=SC2054
         PODMAN_ARGS+=(--tmpfs /tmp:size=512m,nosuid,nodev)
-        # Note: no tmpfs on /home/node/.cache -- Playwright browser binaries are
-        # baked into the image there; a tmpfs overlay would shadow them.
-        # Runtime cache is redirected to /tmp via XDG_CACHE_HOME env var.
+        # Runtime cache on tmpfs; browser binaries are in persistent config dir.
         PODMAN_ARGS+=(-e XDG_CACHE_HOME=/tmp/cache)
+        PODMAN_ARGS+=(-e PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers)
+        # Chromium (Playwright) needs adequate shared memory for rendering.
+        PODMAN_ARGS+=(--shm-size=256m)
         PODMAN_ARGS+=(--cap-drop=ALL)
         PODMAN_ARGS+=(--security-opt=no-new-privileges:true)
         [[ -n "$MEMORY_LIMIT" ]] && PODMAN_ARGS+=(--memory="$MEMORY_LIMIT")
@@ -1740,6 +1877,10 @@ build_docker_args() {
     
     if [[ "$SECURITY_TIER" == "standard" ]]; then
         # Standard: Compatibility-first, writable config/workspace.
+        # Chromium (Playwright) needs adequate shared memory for rendering.
+        DOCKER_ARGS+=(--shm-size=256m)
+        # Browser binaries are installed to the persistent config dir (layer6.5).
+        DOCKER_ARGS+=(-e PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers)
         DOCKER_ARGS+=(-v "$CONFIG_DIR:/home/node/.openclaw:rw")
         DOCKER_ARGS+=(-v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw")
     elif [[ "$SECURITY_TIER" == "balanced" ]]; then
@@ -1748,10 +1889,11 @@ build_docker_args() {
         # /tmp needs exec for Chromium child processes and ffmpeg
         # shellcheck disable=SC2054
         DOCKER_ARGS+=(--tmpfs /tmp:size=512m,nosuid,nodev)
-        # Note: no tmpfs on /home/node/.cache -- Playwright browser binaries are
-        # baked into the image there; a tmpfs overlay would shadow them.
-        # Runtime cache is redirected to /tmp via XDG_CACHE_HOME env var.
+        # Runtime cache on tmpfs; browser binaries are in persistent config dir.
         DOCKER_ARGS+=(-e XDG_CACHE_HOME=/tmp/cache)
+        DOCKER_ARGS+=(-e PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers)
+        # Chromium (Playwright) needs adequate shared memory for rendering.
+        DOCKER_ARGS+=(--shm-size=256m)
         DOCKER_ARGS+=(--cap-drop=ALL)
         DOCKER_ARGS+=(--security-opt=no-new-privileges:true)
         [[ -n "$MEMORY_LIMIT" ]] && DOCKER_ARGS+=(--memory="$MEMORY_LIMIT")
@@ -2046,26 +2188,26 @@ PublishPort=127.0.0.1:$BRIDGE_PORT:$BRIDGE_PORT
 # Volumes
 EOF
             
-            if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
+            if [[ "$SECURITY_TIER" == "standard" ]]; then
                 cat >> "$quadlet_file" << EOF
 Volume=$CONFIG_DIR:/home/node/.openclaw:rw
 Volume=$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw
+
+# Browser support (Playwright Chromium for channels)
+Environment=PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers
+ShmSize=256m
 EOF
-            else
+            elif [[ "$SECURITY_TIER" == "balanced" ]]; then
                 cat >> "$quadlet_file" << EOF
-Volume=$CONFIG_DIR:/home/node/.openclaw:ro
+Volume=$CONFIG_DIR:/home/node/.openclaw:rw
 Volume=$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw
-EOF
-            fi
-            
-            # Add tier-specific hardening flags
-            if [[ "$SECURITY_TIER" == "balanced" ]]; then
-                cat >> "$quadlet_file" << EOF
 
 # Security hardening (balanced: full features + strong isolation)
 ReadOnly=true
 Tmpfs=/tmp:size=512m,nosuid,nodev
 Environment=XDG_CACHE_HOME=/tmp/cache
+Environment=PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers
+ShmSize=256m
 DropCapability=ALL
 SecurityLabelDisable=true
 NoNewPrivileges=true
@@ -2260,20 +2402,27 @@ EOF
         fi
     fi
 
-    # Post-start: Initialize OpenClaw workspace and sessions inside container.
-    # This runs "openclaw setup" to create workspace scaffold (bootstrap files)
-    # and session directories, which are required for full feature support
-    # (channel plugins, config schema, etc.).
-    if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
-        info "Initializing OpenClaw workspace inside container..."
-        sleep 2  # Give the gateway a moment to start
-        local setup_cmd='if [ -f openclaw.mjs ]; then node openclaw.mjs setup --workspace /home/node/.openclaw/workspace; else node dist/index.js setup --workspace /home/node/.openclaw/workspace; fi'
-        if run_container_exec "$setup_cmd" 2>/dev/null; then
-            info "Workspace initialized successfully"
-        else
-            warn "Workspace initialization did not complete (non-fatal)."
-            warn "You can run it manually later from inside the container."
+    # Post-start: verify the gateway is responding on its port.
+    # NOTE: Do NOT run "openclaw doctor --fix" here. Doctor modifies the config
+    # file, which triggers the gateway's file watcher and causes a clean exit.
+    # Without a systemd supervisor, the gateway stays dead. State directories
+    # are created in layer6_5_init_state() before launch instead.
+    if command -v ss >/dev/null 2>&1; then
+        info "Waiting for gateway to start listening..."
+        local retries=0
+        while (( retries < 20 )); do
+            if ss -ltn "sport = :$GATEWAY_PORT" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found ? 0 : 1)}'; then
+                info "Gateway is listening on port $GATEWAY_PORT"
+                break
+            fi
+            sleep 1
+            retries=$((retries + 1))
+        done
+        if (( retries >= 20 )); then
+            warn "Gateway port $GATEWAY_PORT not detected after 20s — check container logs."
         fi
+    else
+        sleep 5
     fi
 
     info "Layer 7 complete"
@@ -2327,6 +2476,21 @@ show_final_summary() {
     echo -e "${GREEN}║${RESET}  ${BOLD}SecureClaw Installation Successful${RESET}                              ${GREEN}║${RESET}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════════════╝${RESET}"
     echo
+
+    # Prominent warning if no API keys configured
+    if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" && -z "${OPENROUTER_API_KEY:-}" && -z "${GEMINI_API_KEY:-}" ]]; then
+        echo -e "${RED}╔════════════════════════════════════════════════════════════════════╗${RESET}"
+        echo -e "${RED}║${RESET}  ${BOLD}${RED}WARNING: No API Keys Configured${RESET}                                 ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}                                                                    ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}  Chat will not work without at least one LLM API key.              ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}  Add a key to: ${BOLD}$CONFIG_DIR/.env${RESET}       ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}                                                                    ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}  Supported providers: Anthropic, OpenAI, OpenRouter, Gemini        ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}  Then restart the container for changes to take effect.             ${RED}║${RESET}"
+        echo -e "${RED}╚════════════════════════════════════════════════════════════════════╝${RESET}"
+        echo
+    fi
+
     echo -e "${BOLD}Dashboard URL:${RESET}"
     echo -e "  http://localhost:$GATEWAY_PORT"
     echo
@@ -2712,6 +2876,8 @@ main() {
     layer2_container_image
     set_phase "layer6 configuration"
     layer6_configuration
+    set_phase "layer6.5 state initialization"
+    layer6_5_init_state
     set_phase "layer3 container hardening"
     layer3_container_hardening
     set_phase "layer4 firewall"

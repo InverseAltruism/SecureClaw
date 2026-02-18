@@ -315,12 +315,7 @@ build_new_image() {
         chmod -R a+rX "$source_dir" || die "Failed to make source tree readable for rootless build user"
     fi
 
-    # Include browser for standard/balanced tiers (full feature parity)
     local build_args=()
-    if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
-        info "Including headless browser for full feature parity..."
-        build_args+=(--build-arg OPENCLAW_INSTALL_BROWSER=1)
-    fi
 
     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
         sudo -u "$SYSTEM_USER" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
@@ -417,18 +412,15 @@ main() {
     restart_openclaw
     verify_running
 
-    # Post-restart: Re-initialize OpenClaw workspace inside container.
-    # This ensures workspace scaffold and session directories exist after update,
-    # which are required for channel plugins and config schema support.
+    # Post-restart: reinstall Playwright browsers if needed.
+    # The updated image may ship a newer playwright-core that requires matching
+    # browser binaries.  The install lives in the persistent config dir.
     if [[ "$SECURITY_TIER" == "standard" || "$SECURITY_TIER" == "balanced" ]]; then
-        info "Initializing OpenClaw workspace inside container..."
-        sleep 2
-        local setup_cmd='if [ -f openclaw.mjs ]; then node openclaw.mjs setup --workspace /home/node/.openclaw/workspace; else node dist/index.js setup --workspace /home/node/.openclaw/workspace; fi'
-        if run_container_exec "$setup_cmd" 2>/dev/null; then
-            info "Workspace initialized successfully"
+        info "Reinstalling Playwright Chromium for updated image..."
+        if run_container_exec "PLAYWRIGHT_BROWSERS_PATH=/home/node/.openclaw/.browsers node /app/node_modules/playwright-core/cli.js install chromium" 2>&1; then
+            info "Playwright Chromium updated successfully"
         else
-            warn "Workspace initialization did not complete (non-fatal)."
-            warn "You can run it manually later from inside the container."
+            warn "Playwright browser reinstall failed (non-fatal). Channels may need manual browser install."
         fi
     fi
 
